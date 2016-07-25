@@ -549,15 +549,21 @@ int migrate_huge_page_move_mapping(struct address_space *mapping,
  * specialized.
  */
 static void __copy_gigantic_page(struct page *dst, struct page *src,
-				int nr_pages)
+				int nr_pages, enum migrate_mode mode)
 {
 	int i;
 	struct page *dst_base = dst;
 	struct page *src_base = src;
+	int rc = -EFAULT;
 
 	for (i = 0; i < nr_pages; ) {
 		cond_resched();
-		copy_highpage(dst, src);
+
+		if (mode & MIGRATE_DMA)
+			rc = copy_page_dma(dst, src, 1);
+
+		if (rc)
+			copy_highpage(dst, src);
 
 		i++;
 		dst = mem_map_next(dst, dst_base, i);
@@ -578,7 +584,7 @@ static void copy_huge_page(struct page *dst, struct page *src,
 		nr_pages = pages_per_huge_page(h);
 
 		if (unlikely(nr_pages > MAX_ORDER_NR_PAGES)) {
-			__copy_gigantic_page(dst, src, nr_pages);
+			__copy_gigantic_page(dst, src, nr_pages, mode);
 			return;
 		}
 	} else {
@@ -593,6 +599,8 @@ static void copy_huge_page(struct page *dst, struct page *src,
 
 	if (mode & MIGRATE_MT)
 		rc = copy_page_multithread(dst, src, nr_pages);
+	else if (mode & MIGRATE_DMA)
+		rc = copy_page_dma(dst, src, nr_pages);
 
 	if (rc)
 		for (i = 0; i < nr_pages; i++) {
@@ -668,10 +676,17 @@ EXPORT_SYMBOL(migrate_page_states);
 void migrate_page_copy(struct page *newpage, struct page *page,
 		enum migrate_mode mode)
 {
+	int rc = -EFAULT;
+
 	if (PageHuge(page) || PageTransHuge(page))
 		copy_huge_page(newpage, page, mode);
-	else
-		copy_highpage(newpage, page);
+	else {
+		if (mode & MIGRATE_DMA)
+			rc = copy_page_dma(newpage, page, 1);
+
+		if (rc)
+			copy_highpage(newpage, page);
+	}
 
 	migrate_page_states(newpage, page);
 }
@@ -1492,7 +1507,8 @@ static int store_status(int __user *status, int start, int value, int nr)
 }
 
 static int do_move_pages_to_node(struct mm_struct *mm,
-		struct list_head *pagelist, int node, bool migrate_mt)
+		struct list_head *pagelist, int node,
+		bool migrate_mt, bool migrate_dma)
 {
 	int err;
 
@@ -1500,7 +1516,8 @@ static int do_move_pages_to_node(struct mm_struct *mm,
 		return 0;
 
 	err = migrate_pages(pagelist, alloc_new_node_page, NULL, node,
-			MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD),
+			MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
+			(migrate_dma ? MIGRATE_DMA : MIGRATE_SINGLETHREAD),
 			MR_SYSCALL);
 	if (err)
 		putback_movable_pages(pagelist);
@@ -1625,7 +1642,7 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 			start = i;
 		} else if (node != current_node) {
 			err = do_move_pages_to_node(mm, &pagelist, current_node,
-				flags & MPOL_MF_MOVE_MT);
+				flags & MPOL_MF_MOVE_MT, flags & MPOL_MF_MOVE_DMA);
 			if (err) {
 				/*
 				 * Positive err means the number of failed
@@ -1669,7 +1686,7 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 			goto out_flush;
 
 		err = do_move_pages_to_node(mm, &pagelist, current_node,
-				flags & MPOL_MF_MOVE_MT);
+				flags & MPOL_MF_MOVE_MT, flags & MPOL_MF_MOVE_DMA);
 		if (err) {
 			if (err > 0)
 				err += nr_pages - i - 1;
@@ -1688,7 +1705,7 @@ out_flush:
 
 	/* Make sure we do not overwrite the existing error */
 	err1 = do_move_pages_to_node(mm, &pagelist, current_node,
-				flags & MPOL_MF_MOVE_MT);
+				flags & MPOL_MF_MOVE_MT, flags & MPOL_MF_MOVE_DMA);
 	/*
 	 * Don't have to report non-attempted pages here since:
 	 *     - If the above loop is done gracefully all pages have been
@@ -1791,7 +1808,7 @@ static int kernel_move_pages(pid_t pid, unsigned long nr_pages,
 	nodemask_t task_nodes;
 
 	/* Check flags */
-	if (flags & ~(MPOL_MF_MOVE|MPOL_MF_MOVE_ALL|MPOL_MF_MOVE_MT))
+	if (flags & ~(MPOL_MF_MOVE|MPOL_MF_MOVE_ALL|MPOL_MF_MOVE_MT|MPOL_MF_MOVE_DMA))
 		return -EINVAL;
 
 	if ((flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE))

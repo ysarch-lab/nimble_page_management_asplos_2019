@@ -23,6 +23,7 @@ enum migrate_mode {
 	MIGRATE_SYNC_NO_COPY = 1<<3,
 	MIGRATE_SINGLETHREAD	= 0,
 	MIGRATE_MT				= 1<<4,
+	MIGRATE_DMA				= 1<<5,
 };
 
 #endif		/* MIGRATE_MODE_H_INCLUDED */
