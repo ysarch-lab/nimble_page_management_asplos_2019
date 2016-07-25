@@ -263,6 +263,7 @@ static inline void copy_user_highpage(struct page *to, struct page *from,
 
 #ifndef __HAVE_ARCH_COPY_HIGHPAGE
 int copy_page_multithread(struct page *to, struct page *from, int nr_pages);
+int copy_page_dma(struct page *to, struct page *from, int nr_pages);
 
 static inline void copy_highpage(struct page *to, struct page *from)
 {

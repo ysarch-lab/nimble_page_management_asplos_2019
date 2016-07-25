@@ -101,4 +101,7 @@ extern int sched_energy_aware_handler(struct ctl_table *table, int write,
 				 loff_t *ppos);
 #endif
 
+extern int sysctl_dma_page_migration(struct ctl_table *table, int write,
+				 void __user *buffer, size_t *lenp,
+				 loff_t *ppos);
 #endif /* _LINUX_SCHED_SYSCTL_H */
