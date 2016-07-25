@@ -99,6 +99,8 @@
 
 extern int accel_page_copy;
 extern unsigned int limit_mt_num;
+extern int use_all_dma_chans;
+extern int limit_dma_chans;
 
 /* External variables not in a header file. */
 extern int suid_dumpable;
@@ -1382,6 +1384,23 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= proc_dointvec,
 		.extra1		= &zero,
 	},
+	 {
+		.procname	= "use_all_dma_chans",
+		.data		= &use_all_dma_chans,
+		.maxlen		= sizeof(use_all_dma_chans),
+		.mode		= 0644,
+		.proc_handler	= sysctl_dma_page_migration,
+		.extra1		= &zero,
+		.extra2		= &one,
+	 },
+	 {
+		.procname	= "limit_dma_chans",
+		.data		= &limit_dma_chans,
+		.maxlen		= sizeof(limit_dma_chans),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+		.extra1		= &zero,
+	 },
 	 {
 		.procname	= "hugetlb_shm_group",
 		.data		= &sysctl_hugetlb_shm_group,
