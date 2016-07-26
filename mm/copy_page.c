@@ -450,7 +450,7 @@ int copy_page_dma(struct page *to, struct page *from, int nr_pages)
  * Just put each page into individual DMA channel.
  *
  * */
-int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_pages)
+int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_items)
 {
 	struct dma_async_tx_descriptor **tx = NULL;
 	dma_cookie_t *cookie = NULL;
@@ -474,28 +474,34 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_page
 	/* round down to closest 2^x value  */
 	total_available_chans = 1<<ilog2(total_available_chans);
 
-	total_available_chans = min_t(int, total_available_chans, nr_pages);
+	total_available_chans = min_t(int, total_available_chans, nr_items);
 
 
-	tx = kzalloc(sizeof(struct dma_async_tx_descriptor*)*nr_pages, GFP_KERNEL);
+	tx = kzalloc(sizeof(struct dma_async_tx_descriptor*)*nr_items, GFP_KERNEL);
 	if (!tx) {
 		ret_val = -ENOMEM;
 		goto out;
 	}
-	cookie = kzalloc(sizeof(dma_cookie_t)*nr_pages, GFP_KERNEL);
+	cookie = kzalloc(sizeof(dma_cookie_t)*nr_items, GFP_KERNEL);
 	if (!cookie) {
 		ret_val = -ENOMEM;
 		goto out_free_tx;
 	}
 
 	for (i = 0; i < total_available_chans; ++i) {
-		int num_xfer_per_dev = nr_pages / total_available_chans;
+		int num_xfer_per_dev = nr_items / total_available_chans;
 
-		if (i < (nr_pages % total_available_chans))
+		if (i < (nr_items % total_available_chans))
 			num_xfer_per_dev += 1;
 
+		if (num_xfer_per_dev > 128) {
+			ret_val = -ENOMEM;
+			pr_err("%s: too many pages to be transferred\n", __func__);
+			goto out_free_both;
+		}
+
 		unmap[i] = dmaengine_get_unmap_data(copy_dev[i]->dev,
-						2*num_xfer_per_dev, GFP_NOWAIT);
+						2 * num_xfer_per_dev, GFP_NOWAIT);
 		if (!unmap[i]) {
 			pr_err("%s: no unmap data at chan %d\n", __func__, i);
 			ret_val = -ENODEV;
@@ -504,10 +510,10 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_page
 	}
 
 	for (i = 0; i < total_available_chans; ++i) {
-		int num_xfer_per_dev = nr_pages / total_available_chans;
+		int num_xfer_per_dev = nr_items / total_available_chans;
 		int xfer_idx;
 
-		if (i < (nr_pages % total_available_chans))
+		if (i < (nr_items % total_available_chans))
 			num_xfer_per_dev += 1;
 
 		unmap[i]->to_cnt = num_xfer_per_dev;
@@ -536,10 +542,10 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_page
 	}
 
 	for (i = 0; i < total_available_chans; ++i) {
-		int num_xfer_per_dev = nr_pages / total_available_chans;
+		int num_xfer_per_dev = nr_items / total_available_chans;
 		int xfer_idx;
 
-		if (i < (nr_pages % total_available_chans))
+		if (i < (nr_items % total_available_chans))
 			num_xfer_per_dev += 1;
 
 		for (xfer_idx = 0; xfer_idx < num_xfer_per_dev; ++xfer_idx) {
@@ -571,10 +577,10 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_page
 	}
 
 	for (i = 0; i < total_available_chans; ++i) {
-		int num_xfer_per_dev = nr_pages / total_available_chans;
+		int num_xfer_per_dev = nr_items / total_available_chans;
 		int xfer_idx;
 
-		if (i < (nr_pages % total_available_chans))
+		if (i < (nr_items % total_available_chans))
 			num_xfer_per_dev += 1;
 
 		for (xfer_idx = 0; xfer_idx < num_xfer_per_dev; ++xfer_idx) {
@@ -594,6 +600,7 @@ unmap_dma:
 			dmaengine_unmap_put(unmap[i]);
 	}
 
+out_free_both:
 	kfree(cookie);
 out_free_tx:
 	kfree(tx);

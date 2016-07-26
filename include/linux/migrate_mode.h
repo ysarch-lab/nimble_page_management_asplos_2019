@@ -24,6 +24,7 @@ enum migrate_mode {
 	MIGRATE_SINGLETHREAD	= 0,
 	MIGRATE_MT				= 1<<4,
 	MIGRATE_DMA				= 1<<5,
+	MIGRATE_CONCUR			= 1<<6,
 };
 
 #endif		/* MIGRATE_MODE_H_INCLUDED */
