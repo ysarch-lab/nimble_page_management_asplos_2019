@@ -541,5 +541,7 @@ extern struct page *alloc_new_node_page(struct page *page, unsigned long node);
 
 extern int copy_page_lists_dma_always(struct page **to,
 			struct page **from, int nr_pages);
+extern int copy_page_lists_mt(struct page **to,
+			struct page **from, int nr_pages);
 
 #endif	/* __MM_INTERNAL_H */
