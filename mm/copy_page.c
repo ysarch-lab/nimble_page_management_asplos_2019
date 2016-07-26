@@ -95,6 +95,65 @@ int copy_page_multithread(struct page *to, struct page *from, int nr_pages)
 
 	return 0;
 }
+
+int copy_page_lists_mt(struct page **to, struct page **from, int nr_pages)
+{
+	int err = 0;
+	int total_mt_num = limit_mt_num;
+	int to_node = page_to_nid(*to);
+	int i;
+	struct copy_page_info *work_items;
+	int nr_pages_per_page = hpage_nr_pages(*from);
+	const struct cpumask *per_node_cpumask = cpumask_of_node(to_node);
+	int cpu_id_list[32] = {0};
+	int cpu;
+
+	work_items = kzalloc(sizeof(struct copy_page_info)*nr_pages,
+						 GFP_KERNEL);
+	if (!work_items)
+		return -ENOMEM;
+
+	total_mt_num = min_t(int, nr_pages, total_mt_num);
+
+	i = 0;
+	for_each_cpu(cpu, per_node_cpumask) {
+		if (i >= total_mt_num)
+			break;
+		cpu_id_list[i] = cpu;
+		++i;
+	}
+
+	for (i = 0; i < nr_pages; ++i) {
+		int thread_idx = i % total_mt_num;
+
+		INIT_WORK((struct work_struct *)&work_items[i],
+				  copy_page_work_queue_thread);
+
+		work_items[i].to = kmap(to[i]);
+		work_items[i].from = kmap(from[i]);
+		work_items[i].chunk_size = PAGE_SIZE * hpage_nr_pages(from[i]);
+
+		BUG_ON(nr_pages_per_page != hpage_nr_pages(from[i]));
+		BUG_ON(nr_pages_per_page != hpage_nr_pages(to[i]));
+
+
+		queue_work_on(cpu_id_list[thread_idx],
+					  system_highpri_wq,
+					  (struct work_struct *)&work_items[i]);
+	}
+
+	/* Wait until it finishes  */
+	flush_workqueue(system_highpri_wq);
+
+	for (i = 0; i < nr_pages; ++i) {
+			kunmap(to[i]);
+			kunmap(from[i]);
+	}
+
+	kfree(work_items);
+
+	return err;
+}
 /* ======================== DMA copy page ======================== */
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
