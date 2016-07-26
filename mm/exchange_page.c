@@ -112,7 +112,7 @@ int exchange_page_mthread(struct page *to, struct page *from, int nr_pages)
 int exchange_page_lists_mthread(struct page **to, struct page **from, int nr_pages) 
 {
 	int err = 0;
-	int total_mt_num = limit_mt_num;
+	unsigned int total_mt_num = limit_mt_num;
 	int to_node = page_to_nid(*to);
 	int i;
 	struct copy_page_info *work_items;
@@ -126,7 +126,8 @@ int exchange_page_lists_mthread(struct page **to, struct page **from, int nr_pag
 						 cpumask_weight(per_node_cpumask));
 	total_mt_num = min_t(int, nr_pages, total_mt_num);
 
-	VM_BUG_ON(total_mt_num > 32);
+	if (total_mt_num > 32 || total_mt_num < 1)
+		return -ENODEV;
 
 	work_items = kzalloc(sizeof(struct copy_page_info)*nr_pages, 
 						 GFP_KERNEL);

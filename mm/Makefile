@@ -46,6 +46,7 @@ obj-y += init-mm.o
 obj-y += copy_page.o
 
 obj-y += exchange_page.o
+obj-y += exchange.o
 
 ifdef CONFIG_NO_BOOTMEM
 	obj-y		+= nobootmem.o

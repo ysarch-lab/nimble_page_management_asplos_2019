@@ -2624,6 +2624,41 @@ void ksm_migrate_page(struct page *newpage, struct page *oldpage)
 		set_page_stable_node(oldpage, NULL);
 	}
 }
+
+void ksm_exchange_page(struct page *to_page, struct page *from_page)
+{
+	struct stable_node *to_stable_node, *from_stable_node;
+
+	VM_BUG_ON_PAGE(!PageLocked(to_page), to_page);
+	VM_BUG_ON_PAGE(!PageLocked(from_page), from_page);
+
+	to_stable_node = page_stable_node(to_page);
+	from_stable_node = page_stable_node(from_page);
+	if (to_stable_node) {
+		VM_BUG_ON_PAGE(to_stable_node->kpfn != page_to_pfn(from_page),
+					from_page);
+		to_stable_node->kpfn = page_to_pfn(to_page);
+		/*
+		 * newpage->mapping was set in advance; now we need smp_wmb()
+		 * to make sure that the new stable_node->kpfn is visible
+		 * to get_ksm_page() before it can see that oldpage->mapping
+		 * has gone stale (or that PageSwapCache has been cleared).
+		 */
+		smp_wmb();
+	}
+	if (from_stable_node) {
+		VM_BUG_ON_PAGE(from_stable_node->kpfn != page_to_pfn(to_page),
+					to_page);
+		from_stable_node->kpfn = page_to_pfn(from_page);
+		/*
+		 * newpage->mapping was set in advance; now we need smp_wmb()
+		 * to make sure that the new stable_node->kpfn is visible
+		 * to get_ksm_page() before it can see that oldpage->mapping
+		 * has gone stale (or that PageSwapCache has been cleared).
+		 */
+		smp_wmb();
+	}
+}
 #endif /* CONFIG_MIGRATION */
 
 #ifdef CONFIG_MEMORY_HOTREMOVE
