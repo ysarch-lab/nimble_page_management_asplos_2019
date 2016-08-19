@@ -22,6 +22,7 @@ enum migrate_mode {
 	MIGRATE_MODE_MASK = 7,
 	MIGRATE_SYNC_NO_COPY = 1<<3,
 	MIGRATE_SINGLETHREAD	= 0,
+	MIGRATE_MT				= 1<<4,
 };
 
 #endif		/* MIGRATE_MODE_H_INCLUDED */
