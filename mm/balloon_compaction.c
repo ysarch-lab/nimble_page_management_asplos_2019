@@ -158,7 +158,7 @@ int balloon_page_migrate(struct address_space *mapping,
 	 * is unlikely to be use with ballon pages. See include/linux/hmm.h for
 	 * user of the MIGRATE_SYNC_NO_COPY mode.
 	 */
-	if (mode == MIGRATE_SYNC_NO_COPY)
+	if (mode & MIGRATE_SYNC_NO_COPY)
 		return -EINVAL;
 
 	VM_BUG_ON_PAGE(!PageLocked(page), page);

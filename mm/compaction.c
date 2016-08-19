@@ -292,7 +292,7 @@ static void update_pageblock_skip(struct compact_control *cc,
 	if (migrate_scanner) {
 		if (pfn > zone->compact_cached_migrate_pfn[0])
 			zone->compact_cached_migrate_pfn[0] = pfn;
-		if (cc->mode != MIGRATE_ASYNC &&
+		if (((cc->mode & MIGRATE_MODE_MASK) != MIGRATE_ASYNC) &&
 		    pfn > zone->compact_cached_migrate_pfn[1])
 			zone->compact_cached_migrate_pfn[1] = pfn;
 	} else {
@@ -325,7 +325,7 @@ static void update_pageblock_skip(struct compact_control *cc,
 static bool compact_trylock_irqsave(spinlock_t *lock, unsigned long *flags,
 						struct compact_control *cc)
 {
-	if (cc->mode == MIGRATE_ASYNC) {
+	if ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC) {
 		if (!spin_trylock_irqsave(lock, *flags)) {
 			cc->contended = true;
 			return false;
@@ -366,7 +366,7 @@ static bool compact_unlock_should_abort(spinlock_t *lock,
 	}
 
 	if (need_resched()) {
-		if (cc->mode == MIGRATE_ASYNC) {
+		if ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC) {
 			cc->contended = true;
 			return true;
 		}
@@ -389,7 +389,7 @@ static inline bool compact_should_abort(struct compact_control *cc)
 {
 	/* async compaction aborts if contended */
 	if (need_resched()) {
-		if (cc->mode == MIGRATE_ASYNC) {
+		if ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC) {
 			cc->contended = true;
 			return true;
 		}
@@ -684,7 +684,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 	 */
 	while (unlikely(too_many_isolated(zone))) {
 		/* async migration should just abort */
-		if (cc->mode == MIGRATE_ASYNC)
+		if ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC)
 			return 0;
 
 		congestion_wait(BLK_RW_ASYNC, HZ/10);
@@ -696,7 +696,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 	if (compact_should_abort(cc))
 		return 0;
 
-	if (cc->direct_compaction && (cc->mode == MIGRATE_ASYNC)) {
+	if (cc->direct_compaction && ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC)) {
 		skip_on_failure = true;
 		next_skip_pfn = block_end_pfn(low_pfn, cc->order);
 	}
@@ -988,7 +988,7 @@ static bool suitable_migration_source(struct compact_control *cc,
 {
 	int block_mt;
 
-	if ((cc->mode != MIGRATE_ASYNC) || !cc->direct_compaction)
+	if (((cc->mode & MIGRATE_MODE_MASK) != MIGRATE_ASYNC) || !cc->direct_compaction)
 		return true;
 
 	block_mt = get_pageblock_migratetype(page);
@@ -1206,7 +1206,7 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 	struct page *page;
 	const isolate_mode_t isolate_mode =
 		(sysctl_compact_unevictable_allowed ? ISOLATE_UNEVICTABLE : 0) |
-		(cc->mode != MIGRATE_SYNC ? ISOLATE_ASYNC_MIGRATE : 0);
+		(((cc->mode & MIGRATE_MODE_MASK) != MIGRATE_SYNC) ? ISOLATE_ASYNC_MIGRATE : 0);
 
 	/*
 	 * Start at where we last stopped, or beginning of the zone as
@@ -1362,7 +1362,7 @@ static enum compact_result __compact_finished(struct zone *zone,
 			 * to sync compaction, as async compaction operates
 			 * on pageblocks of the same migratetype.
 			 */
-			if (cc->mode == MIGRATE_ASYNC ||
+			if ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC ||
 					IS_ALIGNED(cc->migrate_pfn,
 							pageblock_nr_pages)) {
 				return COMPACT_SUCCESS;
@@ -1514,7 +1514,7 @@ static enum compact_result compact_zone(struct zone *zone, struct compact_contro
 	enum compact_result ret;
 	unsigned long start_pfn = zone->zone_start_pfn;
 	unsigned long end_pfn = zone_end_pfn(zone);
-	const bool sync = cc->mode != MIGRATE_ASYNC;
+	const bool sync = (cc->mode & MIGRATE_MODE_MASK) != MIGRATE_ASYNC;
 
 	cc->migratetype = gfpflags_to_migratetype(cc->gfp_mask);
 	ret = compaction_suitable(zone, cc->order, cc->alloc_flags,
@@ -1610,7 +1610,7 @@ static enum compact_result compact_zone(struct zone *zone, struct compact_contro
 			 * order-aligned block, so skip the rest of it.
 			 */
 			if (cc->direct_compaction &&
-						(cc->mode == MIGRATE_ASYNC)) {
+						((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC)) {
 				cc->migrate_pfn = block_end_pfn(
 						cc->migrate_pfn - 1, cc->order);
 				/* Draining pcplists is useless in this case */

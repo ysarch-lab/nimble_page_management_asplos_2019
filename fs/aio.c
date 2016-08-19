@@ -379,7 +379,7 @@ static int aio_migratepage(struct address_space *mapping, struct page *new,
 	 * happen under the ctx->completion_lock. That does not work with the
 	 * migration workflow of MIGRATE_SYNC_NO_COPY.
 	 */
-	if (mode == MIGRATE_SYNC_NO_COPY)
+	if (mode & MIGRATE_SYNC_NO_COPY)
 		return -EINVAL;
 
 	rc = 0;

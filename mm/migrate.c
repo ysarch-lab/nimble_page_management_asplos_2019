@@ -385,7 +385,7 @@ static bool buffer_migrate_lock_buffers(struct buffer_head *head,
 	struct buffer_head *bh = head;
 
 	/* Simple case, sync compaction */
-	if (mode != MIGRATE_ASYNC) {
+	if ((mode & MIGRATE_MODE_MASK) != MIGRATE_ASYNC) {
 		do {
 			get_bh(bh);
 			lock_buffer(bh);
@@ -493,7 +493,7 @@ int migrate_page_move_mapping(struct address_space *mapping,
 	 * the mapping back due to an elevated page count, we would have to
 	 * block waiting on other references to be dropped.
 	 */
-	if (mode == MIGRATE_ASYNC && head &&
+	if (((mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC) && head &&
 			!buffer_migrate_lock_buffers(head, mode)) {
 		page_ref_unfreeze(page, expected_count);
 		spin_unlock_irq(&mapping->tree_lock);
@@ -751,7 +751,7 @@ int migrate_page(struct address_space *mapping,
 	if (rc != MIGRATEPAGE_SUCCESS)
 		return rc;
 
-	if (mode != MIGRATE_SYNC_NO_COPY)
+	if (!(mode & MIGRATE_SYNC_NO_COPY))
 		migrate_page_copy(newpage, page);
 	else
 		migrate_page_states(newpage, page);
@@ -786,7 +786,7 @@ int buffer_migrate_page(struct address_space *mapping,
 	 * with an IRQ-safe spinlock held. In the sync case, the buffers
 	 * need to be locked now
 	 */
-	if (mode != MIGRATE_ASYNC)
+	if ((mode & MIGRATE_MODE_MASK) !=  MIGRATE_ASYNC)
 		BUG_ON(!buffer_migrate_lock_buffers(head, mode));
 
 	ClearPagePrivate(page);
@@ -804,7 +804,7 @@ int buffer_migrate_page(struct address_space *mapping,
 
 	SetPagePrivate(newpage);
 
-	if (mode != MIGRATE_SYNC_NO_COPY)
+	if (!(mode & MIGRATE_SYNC_NO_COPY))
 		migrate_page_copy(newpage, page);
 	else
 		migrate_page_states(newpage, page);
@@ -871,13 +871,8 @@ static int fallback_migrate_page(struct address_space *mapping,
 {
 	if (PageDirty(page)) {
 		/* Only writeback pages in full synchronous migration */
-		switch (mode) {
-		case MIGRATE_SYNC:
-		case MIGRATE_SYNC_NO_COPY:
-			break;
-		default:
+		if ((mode & MIGRATE_MODE_MASK) != MIGRATE_SYNC)
 			return -EBUSY;
-		}
 		return writeout(mapping, page);
 	}
 
@@ -985,7 +980,7 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 	bool is_lru = !__PageMovable(page);
 
 	if (!trylock_page(page)) {
-		if (!force || mode == MIGRATE_ASYNC)
+		if (!force || ((mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC))
 			goto out;
 
 		/*
@@ -1014,11 +1009,7 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 		 * the retry loop is too short and in the sync-light case,
 		 * the overhead of stalling is too much
 		 */
-		switch (mode) {
-		case MIGRATE_SYNC:
-		case MIGRATE_SYNC_NO_COPY:
-			break;
-		default:
+		if ((mode & MIGRATE_MODE_MASK) != MIGRATE_SYNC) {
 			rc = -EBUSY;
 			goto out_unlock;
 		}
@@ -1275,15 +1266,8 @@ static int unmap_and_move_huge_page(new_page_t get_new_page,
 		return -ENOMEM;
 
 	if (!trylock_page(hpage)) {
-		if (!force)
+		if (!force || ((mode & MIGRATE_MODE_MASK) != MIGRATE_SYNC))
 			goto out;
-		switch (mode) {
-		case MIGRATE_SYNC:
-		case MIGRATE_SYNC_NO_COPY:
-			break;
-		default:
-			goto out;
-		}
 		lock_page(hpage);
 	}
 
@@ -2764,7 +2748,7 @@ static void migrate_vma_pages(struct migrate_vma *migrate)
 			}
 		}
 
-		r = migrate_page(mapping, newpage, page, MIGRATE_SYNC_NO_COPY);
+		r = migrate_page(mapping, newpage, page, MIGRATE_SYNC | MIGRATE_SYNC_NO_COPY);
 		if (r != MIGRATEPAGE_SUCCESS)
 			migrate->src[i] &= ~MIGRATE_PFN_MIGRATE;
 	}
