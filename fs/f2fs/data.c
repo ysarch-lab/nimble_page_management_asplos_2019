@@ -3627,7 +3627,7 @@ int f2fs_migrate_page(struct address_space *mapping,
 	}
 
 	if (!(mode & MIGRATE_SYNC_NO_COPY))
-		migrate_page_copy(newpage, page);
+		migrate_page_copy(newpage, page, MIGRATE_SINGLETHREAD);
 	else
 		migrate_page_states(newpage, page);
 

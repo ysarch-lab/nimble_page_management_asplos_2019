@@ -11,6 +11,8 @@
  *	with the CPU. Instead, page copy happens outside the migratepage()
  *	callback and is likely using a DMA engine. See migrate_vma() and HMM
  *	(mm/hmm.c) for users of this mode.
+ * MIGRATE_SINGLETHREAD uses a single thread to move pages, it is the default
+ *	behavior
  */
 enum migrate_mode {
 	MIGRATE_ASYNC,
@@ -19,6 +21,7 @@ enum migrate_mode {
 
 	MIGRATE_MODE_MASK = 7,
 	MIGRATE_SYNC_NO_COPY = 1<<3,
+	MIGRATE_SINGLETHREAD	= 0,
 };
 
 #endif		/* MIGRATE_MODE_H_INCLUDED */
