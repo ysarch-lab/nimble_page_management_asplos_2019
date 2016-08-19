@@ -3593,7 +3593,7 @@ int f2fs_migrate_page(struct address_space *mapping,
 
 	/* migrating an atomic written page is safe with the inmem_lock hold */
 	if (atomic_written) {
-		if (mode != MIGRATE_SYNC)
+		if ((mode & MIGRATE_MODE_MASK) != MIGRATE_SYNC)
 			return -EBUSY;
 		if (!mutex_trylock(&fi->inmem_lock))
 			return -EAGAIN;
@@ -3626,7 +3626,7 @@ int f2fs_migrate_page(struct address_space *mapping,
 		f2fs_clear_page_private(page);
 	}
 
-	if (mode != MIGRATE_SYNC_NO_COPY)
+	if (!(mode & MIGRATE_SYNC_NO_COPY))
 		migrate_page_copy(newpage, page);
 	else
 		migrate_page_states(newpage, page);

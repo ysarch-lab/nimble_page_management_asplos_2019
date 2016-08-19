@@ -416,7 +416,7 @@ static void update_cached_migrate(struct compact_control *cc, unsigned long pfn)
 
 	if (pfn > zone->compact_cached_migrate_pfn[0])
 		zone->compact_cached_migrate_pfn[0] = pfn;
-	if (cc->mode != MIGRATE_ASYNC &&
+	if ((cc->mode & MIGRATE_MODE_MASK) != MIGRATE_ASYNC &&
 	    pfn > zone->compact_cached_migrate_pfn[1])
 		zone->compact_cached_migrate_pfn[1] = pfn;
 }
@@ -483,7 +483,7 @@ static bool compact_lock_irqsave(spinlock_t *lock, unsigned long *flags,
 						struct compact_control *cc)
 {
 	/* Track if the lock is contended in async mode */
-	if (cc->mode == MIGRATE_ASYNC && !cc->contended) {
+	if ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC && !cc->contended) {
 		if (spin_trylock_irqsave(lock, *flags))
 			return true;
 
@@ -800,7 +800,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 	 */
 	while (unlikely(too_many_isolated(pgdat))) {
 		/* async migration should just abort */
-		if (cc->mode == MIGRATE_ASYNC)
+		if ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC)
 			return 0;
 
 		congestion_wait(BLK_RW_ASYNC, HZ/10);
@@ -811,7 +811,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 
 	cond_resched();
 
-	if (cc->direct_compaction && (cc->mode == MIGRATE_ASYNC)) {
+	if (cc->direct_compaction && ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC)) {
 		skip_on_failure = true;
 		next_skip_pfn = block_end_pfn(low_pfn, cc->order);
 	}
@@ -1128,7 +1128,7 @@ static bool suitable_migration_source(struct compact_control *cc,
 	if (pageblock_skip_persistent(page))
 		return false;
 
-	if ((cc->mode != MIGRATE_ASYNC) || !cc->direct_compaction)
+	if (((cc->mode & MIGRATE_MODE_MASK) != MIGRATE_ASYNC) || !cc->direct_compaction)
 		return true;
 
 	block_mt = get_pageblock_migratetype(page);
@@ -1229,7 +1229,7 @@ fast_isolate_around(struct compact_control *cc, unsigned long pfn, unsigned long
 		return;
 
 	/* Minimise scanning during async compaction */
-	if (cc->direct_compaction && cc->mode == MIGRATE_ASYNC)
+	if (cc->direct_compaction && (cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC)
 		return;
 
 	/* Pageblock boundaries */
@@ -1461,7 +1461,7 @@ static void isolate_freepages(struct compact_control *cc)
 	block_end_pfn = min(block_start_pfn + pageblock_nr_pages,
 						zone_end_pfn(zone));
 	low_pfn = pageblock_end_pfn(cc->migrate_pfn);
-	stride = cc->mode == MIGRATE_ASYNC ? COMPACT_CLUSTER_MAX : 1;
+	stride = (cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC ? COMPACT_CLUSTER_MAX : 1;
 
 	/*
 	 * Isolate free pages until enough are available to migrate the
@@ -1746,7 +1746,7 @@ static isolate_migrate_t isolate_migratepages(struct compact_control *cc)
 	struct page *page;
 	const isolate_mode_t isolate_mode =
 		(sysctl_compact_unevictable_allowed ? ISOLATE_UNEVICTABLE : 0) |
-		(cc->mode != MIGRATE_SYNC ? ISOLATE_ASYNC_MIGRATE : 0);
+		(((cc->mode & MIGRATE_MODE_MASK) != MIGRATE_SYNC) ? ISOLATE_ASYNC_MIGRATE : 0);
 	bool fast_find_block;
 
 	/*
@@ -1919,7 +1919,7 @@ static enum compact_result __compact_finished(struct compact_control *cc)
 			 * to sync compaction, as async compaction operates
 			 * on pageblocks of the same migratetype.
 			 */
-			if (cc->mode == MIGRATE_ASYNC ||
+			if ((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC ||
 					IS_ALIGNED(cc->migrate_pfn,
 							pageblock_nr_pages)) {
 				return COMPACT_SUCCESS;
@@ -2075,7 +2075,7 @@ compact_zone(struct compact_control *cc, struct capture_control *capc)
 	unsigned long start_pfn = cc->zone->zone_start_pfn;
 	unsigned long end_pfn = zone_end_pfn(cc->zone);
 	unsigned long last_migrated_pfn;
-	const bool sync = cc->mode != MIGRATE_ASYNC;
+	const bool sync = (cc->mode & MIGRATE_MODE_MASK) != MIGRATE_ASYNC;
 	bool update_cached;
 
 	/*
@@ -2218,7 +2218,7 @@ compact_zone(struct compact_control *cc, struct capture_control *capc)
 			 * order-aligned block, so skip the rest of it.
 			 */
 			if (cc->direct_compaction &&
-						(cc->mode == MIGRATE_ASYNC)) {
+						((cc->mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC)) {
 				cc->migrate_pfn = block_end_pfn(
 						cc->migrate_pfn - 1, cc->order);
 				/* Draining pcplists is useless in this case */
