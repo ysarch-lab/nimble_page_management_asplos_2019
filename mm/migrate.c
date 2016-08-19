@@ -629,7 +629,8 @@ static void __copy_gigantic_page(struct page *dst, struct page *src,
 	}
 }
 
-static void copy_huge_page(struct page *dst, struct page *src)
+static void copy_huge_page(struct page *dst, struct page *src,
+				enum migrate_mode mode)
 {
 	int i;
 	int nr_pages;
@@ -717,10 +718,11 @@ void migrate_page_states(struct page *newpage, struct page *page)
 }
 EXPORT_SYMBOL(migrate_page_states);
 
-void migrate_page_copy(struct page *newpage, struct page *page)
+void migrate_page_copy(struct page *newpage, struct page *page,
+		enum migrate_mode mode)
 {
 	if (PageHuge(page) || PageTransHuge(page))
-		copy_huge_page(newpage, page);
+		copy_huge_page(newpage, page, mode);
 	else
 		copy_highpage(newpage, page);
 
@@ -752,7 +754,7 @@ int migrate_page(struct address_space *mapping,
 		return rc;
 
 	if (!(mode & MIGRATE_SYNC_NO_COPY))
-		migrate_page_copy(newpage, page);
+		migrate_page_copy(newpage, page, mode);
 	else
 		migrate_page_states(newpage, page);
 	return MIGRATEPAGE_SUCCESS;
@@ -805,7 +807,7 @@ int buffer_migrate_page(struct address_space *mapping,
 	SetPagePrivate(newpage);
 
 	if (!(mode & MIGRATE_SYNC_NO_COPY))
-		migrate_page_copy(newpage, page);
+		migrate_page_copy(newpage, page, MIGRATE_SINGLETHREAD);
 	else
 		migrate_page_states(newpage, page);
 
@@ -1987,7 +1989,7 @@ int migrate_misplaced_transhuge_page(struct mm_struct *mm,
 	/* anon mapping, we can simply copy page->mapping to the new page: */
 	new_page->mapping = page->mapping;
 	new_page->index = page->index;
-	migrate_page_copy(new_page, page);
+	migrate_page_copy(new_page, page, MIGRATE_SINGLETHREAD);
 	WARN_ON(PageLRU(new_page));
 
 	/* Recheck the target PMD */
