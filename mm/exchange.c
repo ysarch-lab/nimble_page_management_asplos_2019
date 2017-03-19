@@ -19,6 +19,8 @@
 #include <linux/memcontrol.h>
 #include <linux/balloon_compaction.h>
 #include <linux/buffer_head.h>
+#include <linux/fs.h> /* buffer_migrate_page  */
+#include <linux/backing-dev.h>
 
 
 #include "internal.h"
@@ -61,6 +63,25 @@ struct page_flags {
 	unsigned int __pad:3;
 };
 
+
+static void pr_dump_page(struct page *page, const char *msg)
+{
+	pr_debug("dump: %s page(%p): 0x%lx,"
+		"count: %d, mapcount: %d, mapping: %p, index: %#lx, flags: %#lx(%pGp), %s, order: %d"
+		", %s"
+		"\n",
+		msg,
+		page,
+		page_to_pfn(page),
+		page_ref_count(page),
+		PageSlab(page)?0:page_mapcount(page),
+		page->mapping, page_to_pgoff(page),
+		page->flags, &page->flags,
+		PageCompound(page)?"compound_page":"single_page",
+		compound_order(page),
+		PageDirty(page)?"dirty":"clean"
+		);
+}
 
 static void exchange_page(char *to, char *from)
 {
@@ -156,8 +177,8 @@ static void exchange_page_flags(struct page *to_page, struct page *from_page)
 	from_page_flags.page_is_idle = page_is_idle(from_page);
 	clear_page_idle(from_page);
 	from_page_flags.page_swapcache = PageSwapCache(from_page);
-	from_page_flags.page_private = PagePrivate(from_page);
-	ClearPagePrivate(from_page);
+	/*from_page_flags.page_private = PagePrivate(from_page);*/
+	/*ClearPagePrivate(from_page);*/
 	from_page_flags.page_writeback = test_clear_page_writeback(from_page);
 
 
@@ -179,8 +200,8 @@ static void exchange_page_flags(struct page *to_page, struct page *from_page)
 	to_page_flags.page_is_idle = page_is_idle(to_page);
 	clear_page_idle(to_page);
 	to_page_flags.page_swapcache = PageSwapCache(to_page);
-	to_page_flags.page_private = PagePrivate(to_page);
-	ClearPagePrivate(to_page);
+	/*to_page_flags.page_private = PagePrivate(to_page);*/
+	/*ClearPagePrivate(to_page);*/
 	to_page_flags.page_writeback = test_clear_page_writeback(to_page);
 
 	/* set to_page */
@@ -277,18 +298,21 @@ static void exchange_page_flags(struct page *to_page, struct page *from_page)
 static int exchange_page_move_mapping(struct address_space *to_mapping,
 			struct address_space *from_mapping,
 			struct page *to_page, struct page *from_page,
+			struct buffer_head *to_head, struct buffer_head *from_head,
 			enum migrate_mode mode,
 			int to_extra_count, int from_extra_count)
 {
 	int to_expected_count = 1 + to_extra_count,
 		from_expected_count = 1 + from_extra_count;
-	unsigned long from_page_index = page_index(from_page),
-				  to_page_index = page_index(to_page);
+	unsigned long from_page_index = from_page->index;
+	unsigned long to_page_index = to_page->index;
 	int to_swapbacked = PageSwapBacked(to_page),
 		from_swapbacked = PageSwapBacked(from_page);
 	struct address_space *to_mapping_value = to_page->mapping,
 						 *from_mapping_value = from_page->mapping;
 
+	VM_BUG_ON_PAGE(to_mapping != page_mapping(to_page), to_page);
+	VM_BUG_ON_PAGE(from_mapping != page_mapping(from_page), from_page);
 
 	if (!to_mapping) {
 		/* Anonymous page without mapping */
@@ -302,26 +326,124 @@ static int exchange_page_move_mapping(struct address_space *to_mapping,
 			return -EAGAIN;
 	}
 
-	/*
-	 * Now we know that no one else is looking at the page:
-	 * no turning back from here.
-	 */
-	/* from_page  */
-	from_page->index = to_page_index;
-	from_page->mapping = to_mapping_value;
+	/* both are anonymous pages  */
+	if (!from_mapping && !to_mapping) {
+		/* from_page  */
+		from_page->index = to_page_index;
+		from_page->mapping = to_mapping_value;
 
-	ClearPageSwapBacked(from_page);
-	if (to_swapbacked)
-		SetPageSwapBacked(from_page);
+		ClearPageSwapBacked(from_page);
+		if (to_swapbacked)
+			SetPageSwapBacked(from_page);
 
 
-	/* to_page  */
-	to_page->index = from_page_index;
-	to_page->mapping = from_mapping_value;
+		/* to_page  */
+		to_page->index = from_page_index;
+		to_page->mapping = from_mapping_value;
 
-	ClearPageSwapBacked(to_page);
-	if (from_swapbacked)
-		SetPageSwapBacked(to_page);
+		ClearPageSwapBacked(to_page);
+		if (from_swapbacked)
+			SetPageSwapBacked(to_page);
+	} else if (!from_mapping && to_mapping) { /* from is anonymous, to is file-backed  */
+		struct zone *from_zone, *to_zone;
+		void **to_pslot;
+		int dirty;
+		
+		from_zone = page_zone(from_page);
+		to_zone = page_zone(to_page);
+
+		spin_lock_irq(&to_mapping->tree_lock);
+
+		to_pslot = radix_tree_lookup_slot(&to_mapping->page_tree, page_index(to_page));
+
+		to_expected_count += 1 + page_has_private(to_page);
+		if (page_count(to_page) != to_expected_count ||
+			radix_tree_deref_slot_protected(to_pslot, &to_mapping->tree_lock)
+			!= to_page) {
+			spin_unlock_irq(&to_mapping->tree_lock);
+			return -EAGAIN;
+		}
+
+		if (!page_ref_freeze(to_page, to_expected_count)) {
+			spin_unlock_irq(&to_mapping->tree_lock);
+			pr_debug("cannot freeze page count\n");
+			return -EAGAIN;
+		}
+
+		if (mode == MIGRATE_ASYNC && to_head &&
+				!buffer_migrate_lock_buffers(to_head, mode)) {
+			page_ref_unfreeze(to_page, to_expected_count);
+			spin_unlock_irq(&to_mapping->tree_lock);
+
+			pr_debug("cannot lock buffer head\n");
+			return -EAGAIN;
+		}
+
+		/*
+		 * Now we know that no one else is looking at the page:
+		 * no turning back from here.
+		 */
+		ClearPageSwapBacked(from_page);
+		ClearPageSwapBacked(to_page);
+
+		/* from_page  */
+		from_page->index = to_page_index;
+		from_page->mapping = to_mapping_value;
+		/* to_page  */
+		to_page->index = from_page_index;
+		to_page->mapping = from_mapping_value;
+
+		get_page(from_page); /* add cache reference  */
+		if (to_swapbacked)
+			__SetPageSwapBacked(from_page);
+		else
+			VM_BUG_ON_PAGE(PageSwapCache(to_page), to_page);
+
+		if (from_swapbacked)
+			__SetPageSwapBacked(to_page);
+		else
+			VM_BUG_ON_PAGE(PageSwapCache(from_page), from_page);
+
+		dirty = PageDirty(to_page);
+
+		radix_tree_replace_slot(&to_mapping->page_tree, to_pslot, from_page);
+
+		/* drop cache reference */
+		page_ref_unfreeze(to_page, to_expected_count - 1);
+
+		spin_unlock(&to_mapping->tree_lock);
+
+		/*
+		 * If moved to a different zone then also account
+		 * the page for that zone. Other VM counters will be
+		 * taken care of when we establish references to the
+		 * new page and drop references to the old page.
+		 *
+		 * Note that anonymous pages are accounted for
+		 * via NR_FILE_PAGES and NR_ANON_MAPPED if they
+		 * are mapped to swap space.
+		 */
+		if (to_zone != from_zone) {
+			__dec_node_state(to_zone->zone_pgdat, NR_FILE_PAGES);
+			__inc_node_state(from_zone->zone_pgdat, NR_FILE_PAGES);
+			if (PageSwapBacked(to_page) && !PageSwapCache(to_page)) {
+				__dec_node_state(to_zone->zone_pgdat, NR_SHMEM);
+				__inc_node_state(from_zone->zone_pgdat, NR_SHMEM);
+			}
+			if (dirty && mapping_cap_account_dirty(to_mapping)) {
+				__dec_node_state(to_zone->zone_pgdat, NR_FILE_DIRTY);
+				__dec_zone_state(to_zone, NR_ZONE_WRITE_PENDING);
+				__inc_node_state(from_zone->zone_pgdat, NR_FILE_DIRTY);
+				__inc_zone_state(from_zone, NR_ZONE_WRITE_PENDING);
+			}
+		}
+		local_irq_enable();
+
+	} else {
+		/* from is file-backed to is anonymous: fold this to the case above */
+		/* both are file-backed  */
+		BUG();
+	}
 
 	return MIGRATEPAGE_SUCCESS;
 }
@@ -331,6 +453,7 @@ static int exchange_from_to_pages(struct page *to_page, struct page *from_page,
 {
 	int rc = -EBUSY;
 	struct address_space *to_page_mapping, *from_page_mapping;
+	struct buffer_head *to_head = NULL, *to_bh = NULL;
 
 	VM_BUG_ON_PAGE(!PageLocked(from_page), from_page);
 	VM_BUG_ON_PAGE(!PageLocked(to_page), to_page);
@@ -339,15 +462,79 @@ static int exchange_from_to_pages(struct page *to_page, struct page *from_page,
 	to_page_mapping = page_mapping(to_page);
 	from_page_mapping = page_mapping(from_page);
 
+	/* from_page has to be anonymous page  */
 	BUG_ON(from_page_mapping);
-	BUG_ON(to_page_mapping);
-
 	BUG_ON(PageWriteback(from_page));
+	/* writeback has to finish */
 	BUG_ON(PageWriteback(to_page));
 
-	/* actual page mapping exchange */
-	rc = exchange_page_move_mapping(to_page_mapping, from_page_mapping,
-						to_page, from_page, mode, 0, 0);
+	pr_dump_page(from_page, "exchange anonymous page: from ");
+
+	/* to_page is anonymous  */
+	if (!to_page_mapping) {
+		pr_dump_page(to_page, "exchange anonymous page: to ");
+exchange_mappings:
+		/* actual page mapping exchange */
+		rc = exchange_page_move_mapping(to_page_mapping, from_page_mapping,
+							to_page, from_page, NULL, NULL, mode, 0, 0);
+	} else {
+		if (to_page_mapping->a_ops->migratepage == buffer_migrate_page) {
+
+			pr_dump_page(to_page, "exchange has migratepage: to ");
+
+			if (!page_has_buffers(to_page))
+				goto exchange_mappings;
+
+			to_head = page_buffers(to_page);
+
+			rc = exchange_page_move_mapping(to_page_mapping,
+					from_page_mapping, to_page, from_page,
+					to_head, NULL, mode, 0, 0);
+
+			if (rc != MIGRATEPAGE_SUCCESS)
+				return rc;
+
+			/*
+			 * In the async case, migrate_page_move_mapping locked the buffers
+			 * with an IRQ-safe spinlock held. In the sync case, the buffers
+			 * need to be locked now
+			 */
+			if (mode != MIGRATE_ASYNC)
+				BUG_ON(!buffer_migrate_lock_buffers(to_head, mode));
+
+			ClearPagePrivate(to_page);
+			set_page_private(from_page, page_private(to_page));
+			set_page_private(to_page, 0);
+			/* transfer private page count  */
+			put_page(to_page);
+			get_page(from_page);
+
+			to_bh = to_head;
+			do {
+				set_bh_page(to_bh, from_page, bh_offset(to_bh));
+				to_bh = to_bh->b_this_page;
+
+			} while (to_bh != to_head);
+
+			SetPagePrivate(from_page);
+
+			to_bh = to_head;
+		} else if (!to_page_mapping->a_ops->migratepage) {
+			/* fallback_migrate_page  */
+			pr_dump_page(to_page, "exchange no migratepage: to ");
+
+			if (PageDirty(to_page)) {
+				if (mode != MIGRATE_SYNC)
+					return -EBUSY;
+				return writeout(to_page_mapping, to_page);
+			}
+			if (page_has_private(to_page) &&
+				!try_to_release_page(to_page, GFP_KERNEL))
+				return -EAGAIN;
+
+			goto exchange_mappings;
+		}
+	}
 	/* actual page data exchange  */
 	if (rc != MIGRATEPAGE_SUCCESS)
 		return rc;
@@ -365,27 +552,77 @@ static int exchange_from_to_pages(struct page *to_page, struct page *from_page,
 		rc = 0;
 	}
 
+	/*
+	 * 1. buffer_migrate_page: 
+	 *   private flag should be transferred from to_page to from_page
+	 *
+	 * 2. anon<->anon, fallback_migrate_page:
+	 *   both have none private flags or to_page's is cleared.
+	 * */
+	VM_BUG_ON(!((page_has_private(from_page) && !page_has_private(to_page)) ||
+				(!page_has_private(from_page) && !page_has_private(to_page))));
+
 	exchange_page_flags(to_page, from_page);
+
+	pr_dump_page(from_page, "after exchange: from ");
+	pr_dump_page(to_page, "after exchange: to ");
+
+	if (to_bh) {
+		VM_BUG_ON(to_bh != to_head);
+		do {
+			unlock_buffer(to_bh);
+			put_bh(to_bh);
+			to_bh = to_bh->b_this_page;
+
+		} while (to_bh != to_head);
+	}
 
 	return rc;
 }
 
-static int unmap_and_exchange_anon(struct page *from_page, struct page *to_page,
-				enum migrate_mode mode)
+static int unmap_and_exchange(struct page *from_page, 
+		struct page *to_page, enum migrate_mode mode)
 {
 	int rc = -EAGAIN;
-	int from_page_was_mapped = 0, to_page_was_mapped = 0;
-	struct anon_vma *anon_vma_from_page = NULL, *anon_vma_to_page = NULL;
+	struct anon_vma *from_anon_vma = NULL;
+	struct anon_vma *to_anon_vma = NULL;
+	/*bool is_from_lru = !__PageMovable(from_page);*/
+	/*bool is_to_lru = !__PageMovable(to_page);*/
+	int from_page_was_mapped = 0;
+	int to_page_was_mapped = 0;
+	int from_page_count = 0, to_page_count = 0;
+	int from_map_count = 0, to_map_count = 0;
+	unsigned long from_flags, to_flags;
+	struct address_space *from_mapping, *to_mapping;
 
-	/* from_page lock down  */
 	if (!trylock_page(from_page)) {
-		if (mode & MIGRATE_ASYNC)
+		if (mode == MIGRATE_ASYNC)
 			goto out;
-
 		lock_page(from_page);
 	}
 
-	BUG_ON(PageWriteback(from_page));
+	if (!trylock_page(to_page)) {
+		if (mode == MIGRATE_ASYNC)
+			goto out;
+		lock_page(to_page);
+	}
+
+	/* from_page is supposed to be an anonymous page */
+	VM_BUG_ON_PAGE(PageWriteback(from_page), from_page);
+
+	if (PageWriteback(to_page)) {
+		/*
+		 * Only in the case of a full synchronous migration is it
+		 * necessary to wait for PageWriteback. In the async case,
+		 * the retry loop is too short and in the sync-light case,
+		 * the overhead of stalling is too much
+		 */
+		if (mode != MIGRATE_SYNC) {
+			rc = -EBUSY;
+			goto out_unlock;
+		}
+		wait_on_page_writeback(to_page);
+	}
 
 	/*
 	 * By try_to_unmap(), page->mapcount goes down to 0 here. In this case,
@@ -402,35 +639,29 @@ static int unmap_and_exchange_anon(struct page *from_page, struct page *to_page,
 	 * (and cannot be remapped so long as we hold the page lock).
 	 */
 	if (PageAnon(from_page) && !PageKsm(from_page))
-		anon_vma_from_page = page_get_anon_vma(from_page);
+		from_anon_vma = page_get_anon_vma(from_page);
 
-	/* to_page lock down  */
-	if (!trylock_page(to_page)) {
-		if (mode & MIGRATE_ASYNC)
-			goto out_unlock;
-
-		lock_page(to_page);
-	}
-
-	BUG_ON(PageWriteback(to_page));
-
-	/*
-	 * By try_to_unmap(), page->mapcount goes down to 0 here. In this case,
-	 * we cannot notice that anon_vma is freed while we migrates a page.
-	 * This get_anon_vma() delays freeing anon_vma pointer until the end
-	 * of migration. File cache pages are no problem because of page_lock()
-	 * File Caches may use write_page() or lock_page() in migration, then,
-	 * just care Anon page here.
-	 *
-	 * Only page_get_anon_vma() understands the subtleties of
-	 * getting a hold on an anon_vma from outside one of its mms.
-	 * But if we cannot get anon_vma, then we won't need it anyway,
-	 * because that implies that the anon page is no longer mapped
-	 * (and cannot be remapped so long as we hold the page lock).
-	 */
 	if (PageAnon(to_page) && !PageKsm(to_page))
-		anon_vma_to_page = page_get_anon_vma(to_page);
+		to_anon_vma = page_get_anon_vma(to_page);
 
+	/*if (unlikely(!is_from_lru)) {*/
+		/*VM_BUG_ON_PAGE(1, from_page);*/
+		/*goto out_unlock_both;*/
+	/*}*/
+
+	/*if (unlikely(!is_to_lru)) {*/
+		/*pr_debug("exchange non-lru to_page\n");*/
+		/*goto out_unlock_both;*/
+	/*}*/
+
+	from_page_count = page_count(from_page);
+	from_map_count = page_mapcount(from_page);
+	to_page_count = page_count(to_page);
+	to_map_count = page_mapcount(to_page);
+	from_flags = from_page->flags;
+	to_flags = to_page->flags;
+	from_mapping = from_page->mapping;
+	to_mapping = to_page->mapping;
 	/*
 	 * Corner case handling:
 	 * 1. When a new swap-cache page is read into, it is added to the LRU
@@ -452,7 +683,7 @@ static int unmap_and_exchange_anon(struct page *from_page, struct page *to_page,
 	} else if (page_mapped(from_page)) {
 		/* Establish migration ptes */
 		VM_BUG_ON_PAGE(PageAnon(from_page) && !PageKsm(from_page) &&
-					   !anon_vma_from_page, from_page);
+					   !from_anon_vma, from_page);
 		try_to_unmap(from_page,
 			TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
 		from_page_was_mapped = 1;
@@ -462,40 +693,115 @@ static int unmap_and_exchange_anon(struct page *from_page, struct page *to_page,
 		VM_BUG_ON_PAGE(PageAnon(to_page), to_page);
 		if (page_has_private(to_page)) {
 			try_to_free_buffers(to_page);
-			goto out_unlock_both;
+			goto out_unlock_both_remove_from_migration_pte;
 		}
 	} else if (page_mapped(to_page)) {
 		/* Establish migration ptes */
 		VM_BUG_ON_PAGE(PageAnon(to_page) && !PageKsm(to_page) &&
-					   !anon_vma_to_page, to_page);
+						!to_anon_vma, to_page);
 		try_to_unmap(to_page,
 			TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
 		to_page_was_mapped = 1;
 	}
 
-	if (!page_mapped(from_page) && !page_mapped(to_page))
+	if (!page_mapped(from_page) && !page_mapped(to_page)) {
 		rc = exchange_from_to_pages(to_page, from_page, mode);
+		pr_debug("exchange_from_to_pages from: %lx, to %lx: %d\n", page_to_pfn(from_page), page_to_pfn(to_page), rc);
+	}
 
-	if (from_page_was_mapped)
-		remove_migration_ptes(from_page,
-			rc == MIGRATEPAGE_SUCCESS ? to_page : from_page, false);
 
 	if (to_page_was_mapped)
 		remove_migration_ptes(to_page,
 			rc == MIGRATEPAGE_SUCCESS ? from_page : to_page, false);
 
+out_unlock_both_remove_from_migration_pte:
+	if (from_page_was_mapped)
+		remove_migration_ptes(from_page,
+			rc == MIGRATEPAGE_SUCCESS ? to_page : from_page, false);
 
+	if (rc == MIGRATEPAGE_SUCCESS) {
+		if (from_page_count != page_count(to_page) ||
+			to_page_count != page_count(from_page) ||
+			from_map_count != page_mapcount(to_page) ||
+			to_map_count != page_mapcount(from_page)) {
+
+			if (page_mapping(from_page) &&
+				!page_mapping(from_page)->a_ops->migratepage &&
+				to_page_count == page_count(from_page) + 1 &&
+				to_map_count == page_mapcount(from_page) &&
+				from_page_count == page_count(to_page) &&
+				from_map_count == page_mapcount(to_page)) {
+
+			} else if ((PageWaiters(from_page)?
+				to_page_count < page_count(from_page):
+				to_page_count == page_count(from_page))&&
+				to_map_count == page_mapcount(from_page) &&
+
+				(PageWaiters(to_page)?
+				from_page_count < page_count(to_page):
+				from_page_count == page_count(to_page) )&&
+				from_map_count == page_mapcount(to_page)) {
+			} else {
+
+
+			pr_debug("anon<->file: from_page_was_mapped: %d, to_page_was_mapped: %d\n",
+				from_page_was_mapped, to_page_was_mapped);
+			pr_debug("before: from_page_count: %d, from_map_count: %d, from_flags: %#lx(%pGp), from_mapping: %p, "
+				"to_page_count: %d, to_map_count: %d, to_flags: %#lx(%pGp), to_mapping: %p\n", 
+				from_page_count, from_map_count, from_flags, &from_flags, from_mapping,
+				to_page_count, to_map_count, to_flags, &to_flags, to_mapping);
+
+
+			pr_dump_page(from_page, "after exchange: from");
+			pr_dump_page(to_page, "after exchange: to");
+			}
+		}
+	} else {
+		if (from_page_count != page_count(from_page) ||
+			to_page_count != page_count(to_page) ||
+			from_map_count != page_mapcount(from_page) ||
+			to_map_count != page_mapcount(to_page)) {
+
+			if (page_mapping(to_page) &&
+				!page_mapping(to_page)->a_ops->migratepage &&
+				to_page_count == page_count(to_page) + 1 &&
+				to_map_count == page_mapcount(to_page) &&
+				from_page_count == page_count(from_page) &&
+				from_map_count == page_mapcount(from_page)) {
+
+			} else if ((PageWaiters(to_page)?
+				to_page_count < page_count(to_page):
+				to_page_count == page_count(to_page) )&&
+				to_map_count == page_mapcount(to_page) &&
+
+				(PageWaiters(from_page)?
+				from_page_count < page_count(from_page):
+				from_page_count == page_count(from_page) )&&
+				from_map_count == page_mapcount(from_page)) {
+			} else {
+			pr_debug("anon<->file: from_page_was_mapped: %d, to_page_was_mapped: %d, rc: %d\n",
+				from_page_was_mapped, to_page_was_mapped, rc);
+			pr_debug("before: from_page_count: %d, from_map_count: %d, from_flags: %#lx(%pGp), from_mapping: %p, "
+				"to_page_count: %d, to_map_count: %d, to_flags: %#lx(%pGp), to_mapping: %p\n", 
+				from_page_count, from_map_count, from_flags, &from_flags, from_mapping,
+				to_page_count, to_map_count, to_flags, &to_flags, to_mapping);
+
+
+			pr_dump_page(from_page, "exchange failed: from");
+			pr_dump_page(to_page, "exchange failed: to");
+			}
+		}
+	}
 out_unlock_both:
-	if (anon_vma_to_page)
-		put_anon_vma(anon_vma_to_page);
+	if (to_anon_vma)
+		put_anon_vma(to_anon_vma);
 	unlock_page(to_page);
 out_unlock:
 	/* Drop an anon_vma reference if we took one */
-	if (anon_vma_from_page)
-		put_anon_vma(anon_vma_from_page);
+	if (from_anon_vma)
+		put_anon_vma(from_anon_vma);
 	unlock_page(from_page);
 out:
-
 	return rc;
 }
 
@@ -516,27 +822,137 @@ static int exchange_pages(struct list_head *exchange_list,
 		struct page *from_page = one_pair->from_page;
 		struct page *to_page = one_pair->to_page;
 		int rc;
+		int retry = 0;
 
-		if ((page_mapping(from_page) != NULL) ||
-			(page_mapping(to_page) != NULL)) {
+again:
+		if (page_count(from_page) == 1) {
+			/* page was freed from under us. So we are done  */
+			ClearPageActive(from_page);
+			ClearPageUnevictable(from_page);
+
+			put_page(from_page);
+			dec_node_page_state(from_page, NR_ISOLATED_ANON +
+					page_is_file_cache(from_page));
+
+			if (page_count(to_page) == 1) {
+				ClearPageActive(to_page);
+				ClearPageUnevictable(to_page);
+				put_page(to_page);
+			} else
+				goto putback_to_page;
+
+			continue;
+		}
+
+		if (page_count(to_page) == 1) {
+			/* page was freed from under us. So we are done  */
+			ClearPageActive(to_page);
+			ClearPageUnevictable(to_page);
+
+			put_page(to_page);
+
+			dec_node_page_state(to_page, NR_ISOLATED_ANON +
+					page_is_file_cache(to_page));
+
+			dec_node_page_state(from_page, NR_ISOLATED_ANON +
+					page_is_file_cache(from_page));
+			putback_lru_page(from_page);
+			continue;
+		}
+
+		/* TODO: compound page not supported */
+		if (PageCompound(from_page) ||
+			page_mapping(from_page)
+			/* allow to_page to be file-backed page  */
+			/*|| page_mapping(to_page)*/
+			) {
 			++failed;
 			goto putback;
 		}
 
-		
-		rc = unmap_and_exchange_anon(from_page, to_page, mode);
+		rc = unmap_and_exchange(from_page, to_page, mode);
+
+		if (rc == -EAGAIN && retry < 3) {
+			++retry;
+			goto again;
+		}
 
 		if (rc != MIGRATEPAGE_SUCCESS)
 			++failed;
 
 putback:
+		dec_node_page_state(from_page, NR_ISOLATED_ANON +
+				page_is_file_cache(from_page));
+
 		putback_lru_page(from_page);
-		putback_lru_page(to_page);
+putback_to_page:
+		/*if (!__PageMovable(to_page)) {*/
+			dec_node_page_state(to_page, NR_ISOLATED_ANON +
+					page_is_file_cache(to_page));
+
+			putback_lru_page(to_page);
+		/*} else {*/
+			/*putback_movable_page(to_page);*/
+		/*}*/
 
 	}
 	return failed;
 }
 
+
+int exchange_two_pages(struct page *page1, struct page *page2)
+{
+	struct exchange_page_info page_info;
+	LIST_HEAD(exchange_list);
+	int err = -EFAULT;
+	int pagevec_flushed = 0;
+
+	VM_BUG_ON_PAGE(PageTail(page1), page1);
+	VM_BUG_ON_PAGE(PageTail(page2), page2);
+
+retry_isolate1:
+	if (!get_page_unless_zero(page1))
+		return -EAGAIN;
+	err = isolate_lru_page(page1);
+	put_page(page1);
+	if (err) {
+		if (!pagevec_flushed) {
+			migrate_prep();
+			pagevec_flushed = 1;
+			goto retry_isolate1;
+		}
+		return err;
+	}
+	inc_node_page_state(page1,
+			NR_ISOLATED_ANON + page_is_file_cache(page1));
+
+retry_isolate2:
+	if (!get_page_unless_zero(page2)) {
+		putback_lru_page(page1);
+		return -EAGAIN;
+	}
+	err = isolate_lru_page(page2);
+	put_page(page2);
+	if (err) {
+		if (!pagevec_flushed) {
+			migrate_prep();
+			pagevec_flushed = 1;
+			goto retry_isolate2;
+		}
+		return err;
+	}
+	inc_node_page_state(page2,
+			NR_ISOLATED_ANON + page_is_file_cache(page2));
+
+	page_info.from_page = page1;
+	page_info.to_page = page2;
+	INIT_LIST_HEAD(&page_info.list);
+	list_add(&page_info.list, &exchange_list);
+
+
+	return exchange_pages(&exchange_list, MIGRATE_SYNC, 0);
+
+}
 
 static int unmap_pair_pages_concur(struct exchange_page_info *one_pair,
 				int force, enum migrate_mode mode)
@@ -687,7 +1103,7 @@ static int exchange_page_mapping_concur(struct list_head *unmapped_list_ptr,
 
 		/* actual page mapping exchange */
 		rc = exchange_page_move_mapping(to_page_mapping, from_page_mapping,
-							to_page, from_page, mode, 0, 0);
+							to_page, from_page, NULL, NULL, mode, 0, 0);
 
 		if (rc) {
 			list_move(&one_pair->list, exchange_list_ptr);
@@ -869,7 +1285,7 @@ static int exchange_pages_concur(struct list_head *exchange_list,
 		}
 
 		
-		rc = unmap_and_exchange_anon(from_page, to_page, mode);
+		rc = unmap_and_exchange(from_page, to_page, mode);
 
 		if (rc != MIGRATEPAGE_SUCCESS)
 			++nr_failed;
