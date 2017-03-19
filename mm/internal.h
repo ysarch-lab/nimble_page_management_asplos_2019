@@ -543,10 +543,17 @@ extern int copy_page_lists_dma_always(struct page **to,
 			struct page **from, int nr_pages);
 extern int copy_page_lists_mt(struct page **to,
 			struct page **from, int nr_pages);
-
 extern int exchange_page_mthread(struct page *to, struct page *from,
 			int nr_pages);
 extern int exchange_page_lists_mthread(struct page **to,
 						  struct page **from, 
 						  int nr_pages);
+
+extern int exchange_two_pages(struct page *page1, struct page *page2);
+
+bool buffer_migrate_lock_buffers(struct buffer_head *head,
+							enum migrate_mode mode);
+int writeout(struct address_space *mapping, struct page *page);
+
+
 #endif	/* __MM_INTERNAL_H */
