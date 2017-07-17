@@ -228,7 +228,7 @@ static bool remove_migration_pte(struct page *page, struct vm_area_struct *vma,
 		if (PageKsm(page))
 			new = page;
 		else
-			new = page - pvmw.page->index +
+			new = page - page->index +
 				linear_page_index(vma, pvmw.address);
 
 #ifdef CONFIG_ARCH_ENABLE_THP_MIGRATION
