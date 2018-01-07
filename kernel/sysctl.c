@@ -98,6 +98,7 @@
 #if defined(CONFIG_SYSCTL)
 
 extern int accel_page_copy;
+extern unsigned int limit_mt_num;
 
 /* External variables not in a header file. */
 extern int suid_dumpable;
@@ -1372,6 +1373,14 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= proc_dointvec,
 		.extra1		= &zero,
 		.extra2		= &one,
+	},
+	{
+		.procname	= "limit_mt_num",
+		.data		= &limit_mt_num,
+		.maxlen		= sizeof(limit_mt_num),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+		.extra1		= &zero,
 	},
 	 {
 		.procname	= "hugetlb_shm_group",
