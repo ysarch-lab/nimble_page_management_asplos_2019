@@ -16,11 +16,16 @@ unsigned int limit_mt_num = 4;
 
 /* ======================== multi-threaded copy page ======================== */
 
-struct copy_page_info {
-	struct work_struct copy_page_work;
+struct copy_item {
 	char *to;
 	char *from;
 	unsigned long chunk_size;
+};
+
+struct copy_page_info {
+	struct work_struct copy_page_work;
+	unsigned long num_items;
+	struct copy_item item_list[0];
 };
 
 static void copy_page_routine(char *vto, char *vfrom,
@@ -32,10 +37,12 @@ static void copy_page_routine(char *vto, char *vfrom,
 static void copy_page_work_queue_thread(struct work_struct *work)
 {
 	struct copy_page_info *my_work = (struct copy_page_info *)work;
+	int i;
 
-	copy_page_routine(my_work->to,
-					  my_work->from,
-					  my_work->chunk_size);
+	for (i = 0; i < my_work->num_items; ++i)
+		copy_page_routine(my_work->item_list[i].to,
+						  my_work->item_list[i].from,
+						  my_work->item_list[i].chunk_size);
 }
 
 int copy_page_multithread(struct page *to, struct page *from, int nr_pages)
@@ -43,21 +50,29 @@ int copy_page_multithread(struct page *to, struct page *from, int nr_pages)
 	unsigned int total_mt_num = limit_mt_num;
 	int to_node = page_to_nid(to);
 	int i;
-	struct copy_page_info *work_items;
+	struct copy_page_info *work_items[32] = {0};
 	char *vto, *vfrom;
 	unsigned long chunk_size;
 	const struct cpumask *per_node_cpumask = cpumask_of_node(to_node);
 	int cpu_id_list[32] = {0};
 	int cpu;
+	int err = 0;
 
 	total_mt_num = min_t(unsigned int, total_mt_num,
 						 cpumask_weight(per_node_cpumask));
 	total_mt_num = (total_mt_num / 2) * 2;
 
-	work_items = kcalloc(total_mt_num, sizeof(struct copy_page_info),
-						 GFP_KERNEL);
-	if (!work_items)
-		return -ENOMEM;
+	if (total_mt_num > 32)
+		return -ENODEV;
+
+	for (cpu = 0; cpu < total_mt_num; ++cpu) {
+		work_items[cpu] = kzalloc(sizeof(struct copy_page_info)
+						+ sizeof(struct copy_item), GFP_KERNEL);
+		if (!work_items[cpu]) {
+			err = -ENOMEM;
+			goto free_work_items;
+		}
+	}
 
 	i = 0;
 	for_each_cpu(cpu, per_node_cpumask) {
@@ -72,48 +87,65 @@ int copy_page_multithread(struct page *to, struct page *from, int nr_pages)
 	chunk_size = PAGE_SIZE*nr_pages / total_mt_num;
 
 	for (i = 0; i < total_mt_num; ++i) {
-		INIT_WORK((struct work_struct *)&work_items[i],
+		INIT_WORK((struct work_struct *)work_items[i],
 				  copy_page_work_queue_thread);
 
-		work_items[i].to = vto + i * chunk_size;
-		work_items[i].from = vfrom + i * chunk_size;
-		work_items[i].chunk_size = chunk_size;
+		work_items[i]->num_items = 1;
+		work_items[i]->item_list[0].to = vto + i * chunk_size;
+		work_items[i]->item_list[0].from = vfrom + i * chunk_size;
+		work_items[i]->item_list[0].chunk_size = chunk_size;
 
 		queue_work_on(cpu_id_list[i],
 					  system_highpri_wq,
-					  (struct work_struct *)&work_items[i]);
+					  (struct work_struct *)work_items[i]);
 	}
 
 	/* Wait until it finishes  */
 	for (i = 0; i < total_mt_num; ++i)
-		flush_work((struct work_struct *)&work_items[i]);
+		flush_work((struct work_struct *)work_items[i]);
 
 	kunmap(to);
 	kunmap(from);
 
-	kfree(work_items);
+free_work_items:
+	for (cpu = 0; cpu < total_mt_num; ++cpu)
+		if (work_items[cpu])
+			kfree(work_items[cpu]);
 
-	return 0;
+	return err;
 }
 
-int copy_page_lists_mt(struct page **to, struct page **from, int nr_pages)
+int copy_page_lists_mt(struct page **to, struct page **from, int nr_items)
 {
 	int err = 0;
 	int total_mt_num = limit_mt_num;
 	int to_node = page_to_nid(*to);
 	int i;
-	struct copy_page_info *work_items;
-	int nr_pages_per_page = hpage_nr_pages(*from);
+	struct copy_page_info *work_items[32] = {0};
 	const struct cpumask *per_node_cpumask = cpumask_of_node(to_node);
 	int cpu_id_list[32] = {0};
 	int cpu;
+	int max_items_per_thread;
+	int item_idx;
 
-	work_items = kzalloc(sizeof(struct copy_page_info)*nr_pages,
-						 GFP_KERNEL);
-	if (!work_items)
-		return -ENOMEM;
+	total_mt_num = min_t(unsigned int, total_mt_num,
+						 cpumask_weight(per_node_cpumask));
+	total_mt_num = min_t(int, nr_items, total_mt_num);
 
-	total_mt_num = min_t(int, nr_pages, total_mt_num);
+	if (total_mt_num > 32)
+		return -ENODEV;
+
+	max_items_per_thread = (nr_items / total_mt_num) +
+			((nr_items % total_mt_num)?1:0);
+
+	for (cpu = 0; cpu < total_mt_num; ++cpu) {
+		work_items[cpu] = kzalloc(sizeof(struct copy_page_info) +
+					sizeof(struct copy_item)*max_items_per_thread, GFP_KERNEL);
+		if (!work_items[cpu]) {
+			err = -ENOMEM;
+			goto free_work_items;
+		}
+	}
 
 	i = 0;
 	for_each_cpu(cpu, per_node_cpumask) {
@@ -123,34 +155,51 @@ int copy_page_lists_mt(struct page **to, struct page **from, int nr_pages)
 		++i;
 	}
 
-	for (i = 0; i < nr_pages; ++i) {
-		int thread_idx = i % total_mt_num;
+	item_idx = 0;
+	for (cpu = 0; cpu < total_mt_num; ++cpu) {
+		int num_xfer_per_thread = nr_items / total_mt_num;
+		int per_cpu_item_idx;
 
-		INIT_WORK((struct work_struct *)&work_items[i],
+		if (cpu < (nr_items % total_mt_num))
+			num_xfer_per_thread += 1;
+
+		INIT_WORK((struct work_struct *)work_items[cpu],
 				  copy_page_work_queue_thread);
 
-		work_items[i].to = kmap(to[i]);
-		work_items[i].from = kmap(from[i]);
-		work_items[i].chunk_size = PAGE_SIZE * hpage_nr_pages(from[i]);
+		work_items[cpu]->num_items = num_xfer_per_thread;
+		for (per_cpu_item_idx = 0; per_cpu_item_idx < work_items[cpu]->num_items;
+			 ++per_cpu_item_idx, ++item_idx) {
+			work_items[cpu]->item_list[per_cpu_item_idx].to = kmap(to[item_idx]);
+			work_items[cpu]->item_list[per_cpu_item_idx].from =
+				kmap(from[item_idx]);
+			work_items[cpu]->item_list[per_cpu_item_idx].chunk_size =
+				PAGE_SIZE * hpage_nr_pages(from[item_idx]);
 
-		BUG_ON(nr_pages_per_page != hpage_nr_pages(from[i]));
-		BUG_ON(nr_pages_per_page != hpage_nr_pages(to[i]));
+			BUG_ON(hpage_nr_pages(to[item_idx]) !=
+				   hpage_nr_pages(from[item_idx]));
+		}
 
-
-		queue_work_on(cpu_id_list[thread_idx],
+		queue_work_on(cpu_id_list[cpu],
 					  system_highpri_wq,
-					  (struct work_struct *)&work_items[i]);
+					  (struct work_struct *)work_items[cpu]);
 	}
+	if (item_idx != nr_items)
+		pr_err("%s: only %d out of %d pages are transferred\n", __func__,
+			item_idx - 1, nr_items);
 
 	/* Wait until it finishes  */
-	flush_workqueue(system_highpri_wq);
+	for (i = 0; i < total_mt_num; ++i)
+		flush_work((struct work_struct *)work_items[i]);
 
-	for (i = 0; i < nr_pages; ++i) {
+	for (i = 0; i < nr_items; ++i) {
 			kunmap(to[i]);
 			kunmap(from[i]);
 	}
 
-	kfree(work_items);
+free_work_items:
+	for (cpu = 0; cpu < total_mt_num; ++cpu)
+		if (work_items[cpu])
+			kfree(work_items[cpu]);
 
 	return err;
 }
@@ -459,6 +508,7 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_item
 	int ret_val = 0;
 	int total_available_chans = NUM_AVAIL_DMA_CHAN;
 	int i;
+	int page_idx;
 
 	for (i = 0; i < NUM_AVAIL_DMA_CHAN; ++i) {
 		if (!copy_chan[i]) {
@@ -509,6 +559,7 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_item
 		}
 	}
 
+	page_idx = 0;
 	for (i = 0; i < total_available_chans; ++i) {
 		int num_xfer_per_dev = nr_items / total_available_chans;
 		int xfer_idx;
@@ -520,8 +571,7 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_item
 		unmap[i]->from_cnt = num_xfer_per_dev;
 		unmap[i]->len = hpage_nr_pages(from[i]) * PAGE_SIZE;
 
-		for (xfer_idx = 0; xfer_idx < num_xfer_per_dev; ++xfer_idx) {
-			int page_idx = i + xfer_idx * total_available_chans;
+		for (xfer_idx = 0; xfer_idx < num_xfer_per_dev; ++xfer_idx, ++page_idx) {
 			size_t page_len = hpage_nr_pages(from[page_idx]) * PAGE_SIZE;
 
 			BUG_ON(page_len != hpage_nr_pages(to[page_idx]) * PAGE_SIZE);
@@ -541,6 +591,7 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_item
 		}
 	}
 
+	page_idx = 0;
 	for (i = 0; i < total_available_chans; ++i) {
 		int num_xfer_per_dev = nr_items / total_available_chans;
 		int xfer_idx;
@@ -548,8 +599,7 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_item
 		if (i < (nr_items % total_available_chans))
 			num_xfer_per_dev += 1;
 
-		for (xfer_idx = 0; xfer_idx < num_xfer_per_dev; ++xfer_idx) {
-			int page_idx = i + xfer_idx * total_available_chans;
+		for (xfer_idx = 0; xfer_idx < num_xfer_per_dev; ++xfer_idx, ++page_idx) {
 
 			tx[page_idx] = copy_dev[i]->device_prep_dma_memcpy(copy_chan[i],
 								unmap[i]->addr[xfer_idx + num_xfer_per_dev],
@@ -576,6 +626,7 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_item
 		dma_async_issue_pending(copy_chan[i]);
 	}
 
+	page_idx = 0;
 	for (i = 0; i < total_available_chans; ++i) {
 		int num_xfer_per_dev = nr_items / total_available_chans;
 		int xfer_idx;
@@ -583,8 +634,7 @@ int copy_page_lists_dma_always(struct page **to, struct page **from, int nr_item
 		if (i < (nr_items % total_available_chans))
 			num_xfer_per_dev += 1;
 
-		for (xfer_idx = 0; xfer_idx < num_xfer_per_dev; ++xfer_idx) {
-			int page_idx = i + xfer_idx * total_available_chans;
+		for (xfer_idx = 0; xfer_idx < num_xfer_per_dev; ++xfer_idx, ++page_idx) {
 
 			if (dma_sync_wait(copy_chan[i], cookie[page_idx]) != DMA_COMPLETE) {
 				ret_val = -6;
