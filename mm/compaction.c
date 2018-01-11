@@ -34,6 +34,10 @@ static inline void count_compact_events(enum vm_event_item item, long delta)
 {
 	count_vm_events(item, delta);
 }
+
+int use_concur_to_compact;
+int num_block_to_scan;
+
 #else
 #define count_compact_event(item) do { } while (0)
 #define count_compact_events(item, delta) do { } while (0)
@@ -1207,6 +1211,7 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 	const isolate_mode_t isolate_mode =
 		(sysctl_compact_unevictable_allowed ? ISOLATE_UNEVICTABLE : 0) |
 		(((cc->mode & MIGRATE_MODE_MASK) != MIGRATE_SYNC) ? ISOLATE_ASYNC_MIGRATE : 0);
+	int num_scanned_block;
 
 	/*
 	 * Start at where we last stopped, or beginning of the zone as
@@ -1224,7 +1229,7 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 	 * Iterate over whole pageblocks until we find the first suitable.
 	 * Do not cross the free scanner.
 	 */
-	for (; block_end_pfn <= cc->free_pfn;
+	for (num_scanned_block = 0; block_end_pfn <= cc->free_pfn;
 			low_pfn = block_end_pfn,
 			block_start_pfn = block_end_pfn,
 			block_end_pfn += pageblock_nr_pages) {
@@ -1258,6 +1263,7 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 		/* Perform the isolation */
 		low_pfn = isolate_migratepages_block(cc, low_pfn,
 						block_end_pfn, isolate_mode);
+		++num_scanned_block;
 
 		if (!low_pfn || cc->contended)
 			return ISOLATE_ABORT;
@@ -1267,7 +1273,8 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 		 * we failed and compact_zone should decide if we should
 		 * continue or not.
 		 */
-		break;
+		if (num_scanned_block > num_block_to_scan)
+			break;
 	}
 
 	/* Record where migration scanner will be restarted. */
@@ -1586,9 +1593,14 @@ static enum compact_result compact_zone(struct zone *zone, struct compact_contro
 			;
 		}
 
-		err = migrate_pages(&cc->migratepages, compaction_alloc,
-				compaction_free, (unsigned long)cc, cc->mode,
-				MR_COMPACTION);
+		if (use_concur_to_compact)
+			err = migrate_pages_concur(&cc->migratepages, compaction_alloc,
+					compaction_free, (unsigned long)cc, cc->mode,
+					MR_COMPACTION);
+		else
+			err = migrate_pages(&cc->migratepages, compaction_alloc,
+					compaction_free, (unsigned long)cc, cc->mode,
+					MR_COMPACTION);
 
 		trace_mm_compaction_migratepages(cc->nr_migratepages, err,
 							&cc->migratepages);

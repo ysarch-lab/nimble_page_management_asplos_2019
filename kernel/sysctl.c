@@ -304,6 +304,8 @@ static int max_sched_tunable_scaling = SCHED_TUNABLESCALING_END-1;
 #ifdef CONFIG_COMPACTION
 static int min_extfrag_threshold;
 static int max_extfrag_threshold = 1000;
+extern int use_concur_to_compact;
+extern int num_block_to_scan;
 #endif
 
 static struct ctl_table kern_table[] = {
@@ -1400,6 +1402,24 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 		.extra1		= &zero,
+	 },
+	 {
+		.procname	= "use_concur_to_compact",
+		.data		= &use_concur_to_compact,
+		.maxlen		= sizeof(use_concur_to_compact),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+		.extra1		= &zero,
+		.extra2		= &one,
+	 },
+	 {
+		.procname	= "num_block_to_scan",
+		.data		= &num_block_to_scan,
+		.maxlen		= sizeof(num_block_to_scan),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+		.extra1		= &zero,
+		.extra2		= &one,
 	 },
 	 {
 		.procname	= "hugetlb_shm_group",
