@@ -1517,6 +1517,7 @@ static int unmap_pages_and_get_new_concur(new_page_t get_new_page,
 			put_new_page(item->new_page, private);
 		else
 			put_page(item->new_page);
+		item->new_page = NULL;
 		goto out;
 	}
 
@@ -1577,6 +1578,7 @@ put_new:
 
 static int move_mapping_concurr(struct list_head *unmapped_list_ptr,
 					   struct list_head *wip_list_ptr,
+					   free_page_t put_new_page, unsigned long private,
 					   enum migrate_mode mode)
 {
 	struct page_migration_work_item *iterator, *iterator2;
@@ -1594,6 +1596,19 @@ static int move_mapping_concurr(struct list_head *unmapped_list_ptr,
 
 		if (page_count(iterator->old_page) != 1) {
 			list_move(&iterator->list, wip_list_ptr);
+			if (iterator->page_was_mapped)
+				remove_migration_ptes(iterator->old_page,
+					iterator->old_page, false);
+			unlock_page(iterator->new_page);
+			if (iterator->anon_vma)
+				put_anon_vma(iterator->anon_vma);
+			unlock_page(iterator->old_page);
+
+			if (put_new_page)
+				put_new_page(iterator->new_page, private);
+			else
+				put_page(iterator->new_page);
+			iterator->new_page = NULL;
 			continue;
 		}
 
@@ -1624,11 +1639,15 @@ static int copy_to_new_pages_concur(struct list_head *unmapped_list_ptr,
 	}
 
 	src_page_list = kzalloc(sizeof(struct page *)*num_pages, GFP_KERNEL);
-	if (!src_page_list)
+	if (!src_page_list) {
+		BUG();
 		return -ENOMEM;
+	}
 	dst_page_list = kzalloc(sizeof(struct page *)*num_pages, GFP_KERNEL);
-	if (!dst_page_list)
+	if (!dst_page_list) {
+		BUG();
 		return -ENOMEM;
+	}
 
 	list_for_each_entry(iterator, unmapped_list_ptr, list) {
 		src_page_list[idx] = iterator->old_page;
@@ -1755,8 +1774,10 @@ int migrate_pages_concur(struct list_head *from, new_page_t get_new_page,
 		list_for_each_entry_safe(iterator, iterator2, &wip_list, list) {
 			cond_resched();
 
-			if (iterator->new_page)
-				continue;
+			if (iterator->new_page) {
+				pr_info("%s: iterator already has a new page?\n", __func__);
+				VM_BUG_ON_PAGE(1, iterator->old_page);
+			}
 
 			/* We do not migrate huge pages, file-backed, or swapcached pages */
 			if (PageHuge(iterator->old_page)) {
@@ -1777,7 +1798,9 @@ int migrate_pages_concur(struct list_head *from, new_page_t get_new_page,
 			case -ENOMEM:
 				if (PageTransHuge(page))
 					list_move(&iterator->list, &serialized_list);
-				goto out;
+				else
+					goto out;
+				break;
 			case -EAGAIN:
 				retry++;
 				break;
@@ -1801,11 +1824,12 @@ int migrate_pages_concur(struct list_head *from, new_page_t get_new_page,
 				break;
 			}
 		}
+out:
 		if (list_empty(&unmapped_list))
 			continue;
 
 		/* move page->mapping to new page, only -EAGAIN could happen  */
-		move_mapping_concurr(&unmapped_list, &wip_list, mode);
+		move_mapping_concurr(&unmapped_list, &wip_list, put_new_page, private, mode);
 		/* copy pages in unmapped_list */
 		copy_to_new_pages_concur(&unmapped_list, mode);
 		/* remove migration pte, if old_page is NULL?, unlock old and new
@@ -1815,11 +1839,10 @@ int migrate_pages_concur(struct list_head *from, new_page_t get_new_page,
 	nr_failed += retry;
 	rc = nr_failed;
 
-	if (!list_empty(&serialized_list)) {
-		rc = migrate_pages(from, get_new_page, put_new_page,
+	if (!list_empty(from))
+		rc = migrate_pages(from, get_new_page, put_new_page, 
 				private, mode, reason);
-	}
-out:
+
 	if (nr_succeeded)
 		count_vm_events(PGMIGRATE_SUCCESS, nr_succeeded);
 	if (nr_failed)
