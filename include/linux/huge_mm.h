@@ -240,9 +240,12 @@ void mm_put_huge_zero_page(struct mm_struct *mm);
 
 #define mk_huge_pmd(page, prot) pmd_mkhuge(mk_pmd(page, prot))
 
+extern int sysctl_enable_thp_migration;
+
 static inline bool thp_migration_supported(void)
 {
-	return IS_ENABLED(CONFIG_ARCH_ENABLE_THP_MIGRATION);
+	return IS_ENABLED(CONFIG_ARCH_ENABLE_THP_MIGRATION) &&
+		sysctl_enable_thp_migration;
 }
 
 #else /* CONFIG_TRANSPARENT_HUGEPAGE */
