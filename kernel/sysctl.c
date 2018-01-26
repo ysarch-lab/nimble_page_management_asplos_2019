@@ -107,6 +107,7 @@ extern int accel_page_copy;
 extern unsigned int limit_mt_num;
 extern int use_all_dma_chans;
 extern int limit_dma_chans;
+extern int sysctl_enable_thp_migration;
 
 /* External variables not in a header file. */
 extern int suid_dumpable;
@@ -1485,6 +1486,15 @@ static struct ctl_table vm_table[] = {
 		.procname	= "num_block_to_scan",
 		.data		= &num_block_to_scan,
 		.maxlen		= sizeof(num_block_to_scan),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	 },
+	 {
+		.procname	= "sysctl_enable_thp_migration",
+		.data		= &sysctl_enable_thp_migration,
+		.maxlen		= sizeof(sysctl_enable_thp_migration),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 		.extra1		= SYSCTL_ZERO,

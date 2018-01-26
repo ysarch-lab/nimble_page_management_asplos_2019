@@ -38,6 +38,7 @@
 #include <asm/pgalloc.h>
 #include "internal.h"
 
+int sysctl_enable_thp_migration = 1;
 /*
  * By default, transparent hugepage support is disabled in order to avoid
  * risking an increased memory footprint for applications that are not
