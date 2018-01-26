@@ -21,6 +21,7 @@
 #include <linux/buffer_head.h>
 #include <linux/fs.h> /* buffer_migrate_page  */
 #include <linux/backing-dev.h>
+#include <linux/sched/mm.h>
 
 
 #include "internal.h"
@@ -42,6 +43,9 @@ struct exchange_page_info {
 
 	struct anon_vma *from_anon_vma;
 	struct anon_vma *to_anon_vma;
+
+	int from_page_was_mapped;
+	int to_page_was_mapped;
 
 	struct list_head list;
 };
@@ -145,7 +149,6 @@ static void exchange_huge_page(struct page *dst, struct page *src)
 	}
 
 	for (i = 0; i < nr_pages; i++) {
-		cond_resched();
 		exchange_highpage(dst + i, src + i);
 	}
 }
@@ -567,7 +570,7 @@ exchange_mappings:
 	}
 
 	/*
-	 * 1. buffer_migrate_page: 
+	 * 1. buffer_migrate_page:
 	 *   private flag should be transferred from to_page to from_page
 	 *
 	 * 2. anon<->anon, fallback_migrate_page:
@@ -594,7 +597,7 @@ exchange_mappings:
 	return rc;
 }
 
-static int unmap_and_exchange(struct page *from_page, 
+static int unmap_and_exchange(struct page *from_page,
 		struct page *to_page, enum migrate_mode mode)
 {
 	int rc = -EAGAIN;
@@ -783,7 +786,7 @@ out_unlock_both_remove_from_migration_pte:
 			pr_debug("anon<->file: from_page_was_mapped: %d, to_page_was_mapped: %d\n",
 				from_page_was_mapped, to_page_was_mapped);
 			pr_debug("before: from_page_count: %d, from_map_count: %d, from_flags: %#lx(%pGp), from_mapping: %p, "
-				"to_page_count: %d, to_map_count: %d, to_flags: %#lx(%pGp), to_mapping: %p\n", 
+				"to_page_count: %d, to_map_count: %d, to_flags: %#lx(%pGp), to_mapping: %p\n",
 				from_page_count, from_map_count, from_flags, &from_flags, from_mapping,
 				to_page_count, to_map_count, to_flags, &to_flags, to_mapping);
 
@@ -818,7 +821,7 @@ out_unlock_both_remove_from_migration_pte:
 			pr_debug("anon<->file: from_page_was_mapped: %d, to_page_was_mapped: %d, rc: %d\n",
 				from_page_was_mapped, to_page_was_mapped, rc);
 			pr_debug("before: from_page_count: %d, from_map_count: %d, from_flags: %#lx(%pGp), from_mapping: %p, "
-				"to_page_count: %d, to_map_count: %d, to_flags: %#lx(%pGp), to_mapping: %p\n", 
+				"to_page_count: %d, to_map_count: %d, to_flags: %#lx(%pGp), to_mapping: %p\n",
 				from_page_count, from_map_count, from_flags, &from_flags, from_mapping,
 				to_page_count, to_map_count, to_flags, &to_flags, to_mapping);
 
@@ -1096,8 +1099,10 @@ static int unmap_pair_pages_concur(struct exchange_page_info *one_pair,
 		/* Establish migration ptes */
 		VM_BUG_ON_PAGE(PageAnon(from_page) && !PageKsm(from_page) &&
 					   !anon_vma_from_page, from_page);
-		rc = try_to_unmap(from_page,
+		try_to_unmap(from_page,
 			TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
+
+		one_pair->from_page_was_mapped = 1;
 	}
 
 	if (!to_page->mapping) {
@@ -1111,11 +1116,13 @@ static int unmap_pair_pages_concur(struct exchange_page_info *one_pair,
 		/* Establish migration ptes */
 		VM_BUG_ON_PAGE(PageAnon(to_page) && !PageKsm(to_page) &&
 					   !anon_vma_to_page, to_page);
-		rc = try_to_unmap(to_page,
+		try_to_unmap(to_page,
 			TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
+
+		one_pair->to_page_was_mapped = 1;
 	}
 
-	return rc;
+	return MIGRATEPAGE_SUCCESS;
 
 out_unlock_both:
 	if (anon_vma_to_page)
@@ -1231,8 +1238,10 @@ static int remove_migration_ptes_concur(struct list_head *unmapped_list_ptr)
 	struct exchange_page_info *iterator;
 
 	list_for_each_entry(iterator, unmapped_list_ptr, list) {
-		remove_migration_ptes(iterator->from_page, iterator->to_page, false);
-		remove_migration_ptes(iterator->to_page, iterator->from_page, false);
+		if (iterator->from_page_was_mapped)
+			remove_migration_ptes(iterator->from_page, iterator->to_page, false);
+		if (iterator->to_page_was_mapped)
+			remove_migration_ptes(iterator->to_page, iterator->from_page, false);
 
 		unlock_page(iterator->from_page);
 
@@ -1357,4 +1366,349 @@ out:
 	list_splice(&serialized_list, exchange_list);
 
 	return nr_failed?-EFAULT:0;
+}
+
+static int store_status(int __user *status, int start, int value, int nr)
+{
+	while (nr-- > 0) {
+		if (put_user(value, status + start))
+			return -EFAULT;
+		start++;
+	}
+
+	return 0;
+}
+
+static int do_exchange_page_list(struct mm_struct *mm,
+		struct list_head *from_pagelist, struct list_head *to_pagelist,
+		bool migrate_mt, bool migrate_concur)
+{
+	int err;
+	struct exchange_page_info *one_pair;
+	LIST_HEAD(exchange_page_list);
+
+	while (!list_empty(from_pagelist)) {
+		struct page *from_page, *to_page;
+
+		from_page = list_first_entry_or_null(from_pagelist, struct page, lru);
+		to_page = list_first_entry_or_null(to_pagelist, struct page, lru);
+
+		if (!from_page || !to_page)
+			break;
+
+		one_pair = kzalloc(sizeof(struct exchange_page_info), GFP_ATOMIC);
+		if (!one_pair) {
+			err = -ENOMEM;
+			break;
+		}
+
+		list_del(&from_page->lru);
+		list_del(&to_page->lru);
+
+		one_pair->from_page = from_page;
+		one_pair->to_page = to_page;
+
+		list_add_tail(&one_pair->list, &exchange_page_list);
+	}
+
+	if (migrate_concur)
+		err = exchange_pages_concur(&exchange_page_list,
+			MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD),
+			MR_SYSCALL);
+	else
+		err = exchange_pages(&exchange_page_list,
+			MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD),
+			MR_SYSCALL);
+
+	while (!list_empty(&exchange_page_list)) {
+		struct exchange_page_info *one_pair =
+			list_first_entry(&exchange_page_list,
+							 struct exchange_page_info, list);
+
+		list_del(&one_pair->list);
+		kfree(one_pair);
+	}
+
+	if (!list_empty(from_pagelist))
+		putback_movable_pages(from_pagelist);
+
+	if (!list_empty(to_pagelist))
+		putback_movable_pages(to_pagelist);
+
+	return err;
+}
+
+static int add_page_for_exchange(struct mm_struct *mm,
+		unsigned long from_addr, unsigned long to_addr,
+		struct list_head *from_pagelist, struct list_head *to_pagelist,
+		bool migrate_all)
+{
+	struct vm_area_struct *from_vma, *to_vma;
+	struct page *from_page, *to_page;
+	LIST_HEAD(err_page_list);
+	unsigned int follflags;
+	int err;
+
+	err = -EFAULT;
+	from_vma = find_vma(mm, from_addr);
+	if (!from_vma || from_addr < from_vma->vm_start ||
+		!vma_migratable(from_vma))
+		goto set_from_status;
+
+	/* FOLL_DUMP to ignore special (like zero) pages */
+	follflags = FOLL_GET | FOLL_DUMP;
+	from_page = follow_page(from_vma, from_addr, follflags);
+
+	err = PTR_ERR(from_page);
+	if (IS_ERR(from_page))
+		goto set_from_status;
+
+	err = -ENOENT;
+	if (!from_page)
+		goto set_from_status;
+
+	err = -EACCES;
+	if (page_mapcount(from_page) > 1 && !migrate_all)
+		goto put_and_set_from_page;
+
+	if (PageHuge(from_page)) {
+		if (PageHead(from_page))
+			if (isolate_huge_page(from_page, &err_page_list)) {
+				err = 0;
+			}
+		goto put_and_set_from_page;
+	} else if (PageTransCompound(from_page)) {
+		if (PageTail(from_page)) {
+			err = -EACCES;
+			goto put_and_set_from_page;
+		}
+	}
+
+	err = isolate_lru_page(from_page);
+	if (!err)
+		mod_node_page_state(page_pgdat(from_page), NR_ISOLATED_ANON +
+					page_is_file_cache(from_page), hpage_nr_pages(from_page));
+put_and_set_from_page:
+	/*
+	 * Either remove the duplicate refcount from
+	 * isolate_lru_page() or drop the page ref if it was
+	 * not isolated.
+	 *
+	 * Since FOLL_GET calls get_page(), and isolate_lru_page()
+	 * also calls get_page()
+	 */
+	put_page(from_page);
+set_from_status:
+	if (err)
+		goto out;
+
+	/* to pages  */
+	err = -EFAULT;
+	to_vma = find_vma(mm, to_addr);
+	if (!to_vma ||
+		to_addr < to_vma->vm_start ||
+		!vma_migratable(to_vma))
+		goto set_to_status;
+
+	/* FOLL_DUMP to ignore special (like zero) pages */
+	to_page = follow_page(to_vma, to_addr, follflags);
+
+	err = PTR_ERR(to_page);
+	if (IS_ERR(to_page))
+		goto set_to_status;
+
+	err = -ENOENT;
+	if (!to_page)
+		goto set_to_status;
+
+	err = -EACCES;
+	if (page_mapcount(to_page) > 1 &&
+			!migrate_all)
+		goto put_and_set_to_page;
+
+	if (PageHuge(to_page)) {
+		if (PageHead(to_page))
+			if (isolate_huge_page(to_page, &err_page_list)) {
+				err = 0;
+			}
+		goto put_and_set_to_page;
+	} else if (PageTransCompound(to_page)) {
+		if (PageTail(to_page)) {
+			err = -EACCES;
+			goto put_and_set_to_page;
+		}
+	}
+
+	err = isolate_lru_page(to_page);
+	if (!err)
+		mod_node_page_state(page_pgdat(to_page), NR_ISOLATED_ANON +
+					page_is_file_cache(to_page), hpage_nr_pages(to_page));
+put_and_set_to_page:
+	/*
+	 * Either remove the duplicate refcount from
+	 * isolate_lru_page() or drop the page ref if it was
+	 * not isolated.
+	 *
+	 * Since FOLL_GET calls get_page(), and isolate_lru_page()
+	 * also calls get_page()
+	 */
+	put_page(to_page);
+set_to_status:
+	if (!err) {
+		if ((PageHuge(from_page) != PageHuge(to_page)) ||
+			(PageTransHuge(from_page) != PageTransHuge(to_page))) {
+			list_add(&from_page->lru, &err_page_list);
+			list_add(&to_page->lru, &err_page_list);
+		} else {
+			list_add_tail(&from_page->lru, from_pagelist);
+			list_add_tail(&to_page->lru, to_pagelist);
+		}
+	} else
+		list_add(&from_page->lru, &err_page_list);
+out:
+	if (!list_empty(&err_page_list))
+		putback_movable_pages(&err_page_list);
+	return err;
+}
+/*
+ * Migrate an array of page address onto an array of nodes and fill
+ * the corresponding array of status.
+ */
+static int do_pages_exchange(struct mm_struct *mm, nodemask_t task_nodes,
+			 unsigned long nr_pages,
+			 const void __user * __user *from_pages,
+			 const void __user * __user *to_pages,
+			 int __user *status, int flags)
+{
+	LIST_HEAD(from_pagelist);
+	LIST_HEAD(to_pagelist);
+	int start, i;
+	int err = 0, err1;
+
+	migrate_prep();
+
+	down_read(&mm->mmap_sem);
+	for (i = start = 0; i < nr_pages; i++) {
+		const void __user *from_p, *to_p;
+		unsigned long from_addr, to_addr;
+
+		err = -EFAULT;
+		if (get_user(from_p, from_pages + i))
+			goto out_flush;
+		if (get_user(to_p, to_pages + i))
+			goto out_flush;
+
+		from_addr = (unsigned long)from_p;
+		to_addr = (unsigned long)to_p;
+
+		err = -EACCES;
+		/*
+		 * Errors in the page lookup or isolation are not fatal and we simply
+		 * report them via status
+		 */
+		err = add_page_for_exchange(mm, from_addr, to_addr,
+				&from_pagelist, &to_pagelist,
+				flags & MPOL_MF_MOVE_ALL);
+
+		if (!err)
+			continue;
+
+		err = store_status(status, i, err, 1);
+		if (err)
+			goto out_flush;
+
+		err = do_exchange_page_list(mm, &from_pagelist, &to_pagelist,
+				flags & MPOL_MF_MOVE_MT,
+				flags & MPOL_MF_MOVE_CONCUR);
+		if (err)
+			goto out;
+		if (i > start) {
+			err = store_status(status, start, 0, i - start);
+			if (err)
+				goto out;
+		}
+		start = i;
+	}
+out_flush:
+	/* Make sure we do not overwrite the existing error */
+	err1 = do_exchange_page_list(mm, &from_pagelist, &to_pagelist,
+				flags & MPOL_MF_MOVE_MT,
+				flags & MPOL_MF_MOVE_CONCUR);
+	if (!err1)
+		err1 = store_status(status, start, 0, i - start);
+	if (!err)
+		err = err1;
+out:
+	up_read(&mm->mmap_sem);
+	return err;
+}
+
+SYSCALL_DEFINE6(exchange_pages, pid_t, pid, unsigned long, nr_pages,
+		const void __user * __user *, from_pages,
+		const void __user * __user *, to_pages,
+		int __user *, status, int, flags)
+{
+	const struct cred *cred = current_cred(), *tcred;
+	struct task_struct *task;
+	struct mm_struct *mm;
+	int err;
+	nodemask_t task_nodes;
+
+	/* Check flags */
+	if (flags & ~(MPOL_MF_MOVE|
+				  MPOL_MF_MOVE_ALL|
+				  MPOL_MF_MOVE_MT|
+				  MPOL_MF_MOVE_CONCUR))
+		return -EINVAL;
+
+	if ((flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE))
+		return -EPERM;
+
+	/* Find the mm_struct */
+	rcu_read_lock();
+	task = pid ? find_task_by_vpid(pid) : current;
+	if (!task) {
+		rcu_read_unlock();
+		return -ESRCH;
+	}
+	get_task_struct(task);
+
+	/*
+	 * Check if this process has the right to modify the specified
+	 * process. The right exists if the process has administrative
+	 * capabilities, superuser privileges or the same
+	 * userid as the target process.
+	 */
+	tcred = __task_cred(task);
+	if (!uid_eq(cred->euid, tcred->suid) && !uid_eq(cred->euid, tcred->uid) &&
+	    !uid_eq(cred->uid,  tcred->suid) && !uid_eq(cred->uid,  tcred->uid) &&
+	    !capable(CAP_SYS_NICE)) {
+		rcu_read_unlock();
+		err = -EPERM;
+		goto out;
+	}
+	rcu_read_unlock();
+
+	err = security_task_movememory(task);
+	if (err)
+		goto out;
+
+	task_nodes = cpuset_mems_allowed(task);
+	mm = get_task_mm(task);
+	put_task_struct(task);
+
+	if (!mm)
+		return -EINVAL;
+
+	err = do_pages_exchange(mm, task_nodes, nr_pages, from_pages,
+				    to_pages, status, flags);
+
+	mmput(mm);
+
+	return err;
+
+out:
+	put_task_struct(task);
+
+	return err;
 }
