@@ -54,6 +54,32 @@ struct signal_struct;
 struct task_delay_info;
 struct task_group;
 
+#ifdef CONFIG_PAGE_MIGRATION_PROFILE
+struct move_pages_breakdown {
+	unsigned long long last_timestamp;
+
+	unsigned long long syscall_timestamp;
+	unsigned long long check_rights_cycles;
+	unsigned long long migrate_prep_cycles;
+	unsigned long long form_page_node_info_cycles;
+	unsigned long long form_physical_page_list_cycles;
+	unsigned long long enter_unmap_and_move_cycles;
+	unsigned long long split_thp_page_cycles;
+	unsigned long long get_new_page_cycles;
+	unsigned long long lock_page_cycles;
+	unsigned long long unmap_page_cycles;
+	unsigned long long change_page_mapping_cycles;
+	unsigned long long copy_page_cycles;
+	unsigned long long remove_migration_ptes_cycles;
+	unsigned long long putback_old_page_cycles;
+	unsigned long long putback_new_page_cycles;
+	unsigned long long migrate_pages_cleanup_cycles;
+	unsigned long long store_page_status_cycles;
+	unsigned long long return_to_syscall_cycles;
+};
+#endif
+
+
 /*
  * Task state bitmask. NOTE! These bits are also
  * encoded in fs/proc/array.c: get_task_state().
@@ -774,6 +800,10 @@ struct task_struct {
 	unsigned long			min_flt;
 	unsigned long			maj_flt;
 
+#ifdef CONFIG_PAGE_MIGRATION_PROFILE
+	struct move_pages_breakdown move_pages_breakdown;
+#endif
+
 #ifdef CONFIG_POSIX_TIMERS
 	struct task_cputime		cputime_expires;
 	struct list_head		cpu_timers[3];
@@ -926,6 +956,7 @@ struct task_struct {
 	siginfo_t			*last_siginfo;
 
 	struct task_io_accounting	ioac;
+
 #ifdef CONFIG_TASK_XACCT
 	/* Accumulated RSS usage: */
 	u64				acct_rss_mem1;

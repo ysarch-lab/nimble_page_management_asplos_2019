@@ -265,6 +265,12 @@ config ARCH_ENABLE_HUGEPAGE_MIGRATION
 config ARCH_ENABLE_THP_MIGRATION
 	bool
 
+config PAGE_MIGRATION_PROFILE
+	bool "Page migration profile"
+	def_bool n
+	help
+	  Profile migrate hugepages with multiple optimizations to get higher throughput.
+
 config PHYS_ADDR_T_64BIT
 	def_bool 64BIT || ARCH_PHYS_ADDR_T_64BIT
 

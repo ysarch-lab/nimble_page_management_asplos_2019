@@ -207,6 +207,91 @@ static int proc_root_link(struct dentry *dentry, struct path *path)
 	return result;
 }
 
+#ifdef CONFIG_PAGE_MIGRATION_PROFILE
+static int proc_pid_move_pages_breakdown(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
+{
+	struct task_struct *t = task;
+	struct move_pages_breakdown move_pages_breakdown = t->move_pages_breakdown;
+
+	seq_printf(m,
+		"syscall_timestamp\t"
+		"check_rights_cycles\t"
+		"migrate_prep_cycles\t"
+		"form_page_node_info_cycles\t"
+		"form_physical_page_list_cycles\t"
+
+		"enter_unmap_and_move_cycles\t"
+		"split_thp_page_cycles\t"
+		"get_new_page_cycles\t"
+		"lock_page_cycles\t"
+		"unmap_page_cycles\t"
+		"change_page_mapping_cycles\t"
+		"copy_page_cycles\t"
+		"remove_migration_ptes_cycles\t"
+		"putback_old_page_cycles\t"
+		"putback_new_page_cycles\t"
+		"migrate_pages_cleanup_cycles\t"
+
+		"store_page_status_cycles\t"
+		"return_to_syscall_cycles\t"
+		"last_timestamp\t"
+		"\n"
+		);
+
+	seq_printf(m,
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+
+		"%llu\t"
+		"%llu\t"
+		"%llu\t"
+		"\n"
+		,
+		move_pages_breakdown.syscall_timestamp,
+		move_pages_breakdown.check_rights_cycles,
+		move_pages_breakdown.migrate_prep_cycles,
+		move_pages_breakdown.form_page_node_info_cycles,
+		move_pages_breakdown.form_physical_page_list_cycles,
+
+		move_pages_breakdown.enter_unmap_and_move_cycles,
+		move_pages_breakdown.split_thp_page_cycles,
+		move_pages_breakdown.get_new_page_cycles,
+		move_pages_breakdown.lock_page_cycles,
+		move_pages_breakdown.unmap_page_cycles,
+		move_pages_breakdown.change_page_mapping_cycles,
+		move_pages_breakdown.copy_page_cycles,
+		move_pages_breakdown.remove_migration_ptes_cycles,
+		move_pages_breakdown.putback_old_page_cycles,
+		move_pages_breakdown.putback_new_page_cycles,
+		move_pages_breakdown.migrate_pages_cleanup_cycles,
+
+		move_pages_breakdown.store_page_status_cycles,
+		move_pages_breakdown.return_to_syscall_cycles,
+		move_pages_breakdown.last_timestamp
+		);
+
+	t->move_pages_breakdown = (struct move_pages_breakdown){0};
+
+	return 0;
+}
+#endif
+
 static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
 				     size_t _count, loff_t *pos)
 {
@@ -2962,6 +3047,9 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_HAVE_ARCH_TRACEHOOK
 	ONE("syscall",    S_IRUSR, proc_pid_syscall),
 #endif
+#ifdef CONFIG_PAGE_MIGRATION_PROFILE
+	ONE("move_pages_breakdown",       S_IRUGO, proc_pid_move_pages_breakdown),
+#endif
 	REG("cmdline",    S_IRUGO, proc_pid_cmdline_ops),
 	ONE("stat",       S_IRUGO, proc_tgid_stat),
 	ONE("statm",      S_IRUGO, proc_pid_statm),
@@ -3353,6 +3441,9 @@ static const struct pid_entry tid_base_stuff[] = {
 			 &proc_pid_set_comm_operations, {}),
 #ifdef CONFIG_HAVE_ARCH_TRACEHOOK
 	ONE("syscall",   S_IRUSR, proc_pid_syscall),
+#endif
+#ifdef CONFIG_PAGE_MIGRATION_PROFILE
+	ONE("move_pages_breakdown",       S_IRUGO, proc_pid_move_pages_breakdown),
 #endif
 	REG("cmdline",   S_IRUGO, proc_pid_cmdline_ops),
 	ONE("stat",      S_IRUGO, proc_tid_stat),

@@ -1649,6 +1649,10 @@ static __latent_entropy struct task_struct *copy_process(
 
 	init_sigpending(&p->pending);
 
+#ifdef CONFIG_PAGE_MIGRATION_PROFILE
+	p->move_pages_breakdown = (struct move_pages_breakdown){0};
+#endif
+
 	p->utime = p->stime = p->gtime = 0;
 #ifdef CONFIG_ARCH_HAS_SCALED_CPUTIME
 	p->utimescaled = p->stimescaled = 0;
