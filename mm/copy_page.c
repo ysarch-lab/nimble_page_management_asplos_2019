@@ -60,9 +60,10 @@ int copy_page_multithread(struct page *to, struct page *from, int nr_pages)
 
 	total_mt_num = min_t(unsigned int, total_mt_num,
 						 cpumask_weight(per_node_cpumask));
-	total_mt_num = (total_mt_num / 2) * 2;
+	if (total_mt_num > 1)
+		total_mt_num = (total_mt_num / 2) * 2;
 
-	if (total_mt_num > 32)
+	if (total_mt_num > 32 || total_mt_num < 1)
 		return -ENODEV;
 
 	for (cpu = 0; cpu < total_mt_num; ++cpu) {
@@ -118,7 +119,7 @@ free_work_items:
 int copy_page_lists_mt(struct page **to, struct page **from, int nr_items)
 {
 	int err = 0;
-	int total_mt_num = limit_mt_num;
+	unsigned int total_mt_num = limit_mt_num;
 	int to_node = page_to_nid(*to);
 	int i;
 	struct copy_page_info *work_items[32] = {0};

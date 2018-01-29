@@ -756,6 +756,8 @@ void migrate_page_copy(struct page *newpage, struct page *page,
 	else {
 		if (mode & MIGRATE_DMA)
 			rc = copy_page_dma(newpage, page, 1);
+		else if (mode & MIGRATE_MT)
+			rc = copy_page_multithread(newpage, page, 1);
 
 		if (rc)
 			copy_highpage(newpage, page);
