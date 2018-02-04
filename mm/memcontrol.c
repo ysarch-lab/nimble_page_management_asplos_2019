@@ -6292,4 +6292,40 @@ static int __init mem_cgroup_swap_init(void)
 }
 subsys_initcall(mem_cgroup_swap_init);
 
+static int memory_per_node_stat_show(struct seq_file *m, void *v)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(m));
+	struct cftype *cur_file = seq_cft(m);
+	int nid = cur_file->numa_node_id;
+	unsigned long val = 0;
+	int i;
+
+	for (i = 0; i < NR_LRU_LISTS; i++)
+		val += mem_cgroup_node_nr_lru_pages(memcg, nid, BIT(i));
+
+	seq_printf(m, "%llu\n", (u64)val * PAGE_SIZE);
+
+	return 0;
+}
+
+static struct cftype memcg_per_node_stats_files[N_MEMORY];
+
+static int __init mem_cgroup_per_node_stats_init(void)
+{
+	int nid;
+
+	for_each_node_state(nid, N_MEMORY) {
+		snprintf(memcg_per_node_stats_files[nid].name, MAX_CFTYPE_NAME,
+				"size_at_node:%d", nid);
+		memcg_per_node_stats_files[nid].flags = CFTYPE_NOT_ON_ROOT;
+		memcg_per_node_stats_files[nid].seq_show = memory_per_node_stat_show;
+		memcg_per_node_stats_files[nid].numa_node_id = nid;
+
+	}
+	WARN_ON(cgroup_add_dfl_cftypes(&memory_cgrp_subsys,
+				memcg_per_node_stats_files));
+	return 0;
+}
+subsys_initcall(mem_cgroup_per_node_stats_init);
+
 #endif /* CONFIG_MEMCG_SWAP */
