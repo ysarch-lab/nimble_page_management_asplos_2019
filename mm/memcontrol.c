@@ -4185,6 +4185,7 @@ static int alloc_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
 	pn->usage_in_excess = 0;
 	pn->on_tree = false;
 	pn->memcg = memcg;
+	pn->max_nr_base_pages = PAGE_COUNTER_MAX;
 
 	memcg->nodeinfo[node] = pn;
 	return 0;
@@ -6308,9 +6309,44 @@ static int memory_per_node_stat_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-static struct cftype memcg_per_node_stats_files[N_MEMORY];
+static int memory_per_node_max_show(struct seq_file *m, void *v)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(m));
+	struct cftype *cur_file = seq_cft(m);
+	int nid = cur_file->numa_node_id;
+	unsigned long max = READ_ONCE(memcg->nodeinfo[nid]->max_nr_base_pages);
 
-static int __init mem_cgroup_per_node_stats_init(void)
+	if (max == PAGE_COUNTER_MAX)
+		seq_puts(m, "max\n");
+	else
+		seq_printf(m, "%llu\n", (u64)max * PAGE_SIZE);
+
+	return 0;
+}
+
+static ssize_t memory_per_node_max_write(struct kernfs_open_file *of,
+				char *buf, size_t nbytes, loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	struct cftype *cur_file = of_cft(of);
+	int nid = cur_file->numa_node_id;
+	unsigned long max;
+	int err;
+
+	buf = strstrip(buf);
+	err = page_counter_memparse(buf, "max", &max);
+	if (err)
+		return err;
+
+	xchg(&memcg->nodeinfo[nid]->max_nr_base_pages, max);
+
+	return nbytes;
+}
+
+static struct cftype memcg_per_node_stats_files[N_MEMORY];
+static struct cftype memcg_per_node_max_files[N_MEMORY];
+
+static int __init mem_cgroup_per_node_init(void)
 {
 	int nid;
 
@@ -6321,11 +6357,19 @@ static int __init mem_cgroup_per_node_stats_init(void)
 		memcg_per_node_stats_files[nid].seq_show = memory_per_node_stat_show;
 		memcg_per_node_stats_files[nid].numa_node_id = nid;
 
+		snprintf(memcg_per_node_max_files[nid].name, MAX_CFTYPE_NAME,
+				"max_at_node:%d", nid);
+		memcg_per_node_max_files[nid].flags = CFTYPE_NOT_ON_ROOT;
+		memcg_per_node_max_files[nid].seq_show = memory_per_node_max_show;
+		memcg_per_node_max_files[nid].write = memory_per_node_max_write;
+		memcg_per_node_max_files[nid].numa_node_id = nid;
 	}
 	WARN_ON(cgroup_add_dfl_cftypes(&memory_cgrp_subsys,
 				memcg_per_node_stats_files));
+	WARN_ON(cgroup_add_dfl_cftypes(&memory_cgrp_subsys,
+				memcg_per_node_max_files));
 	return 0;
 }
-subsys_initcall(mem_cgroup_per_node_stats_init);
+subsys_initcall(mem_cgroup_per_node_init);
 
 #endif /* CONFIG_MEMCG_SWAP */

@@ -110,6 +110,7 @@ struct mem_cgroup_per_node {
 	struct lruvec		lruvec;
 	struct lruvec_stat __percpu *lruvec_stat;
 	unsigned long		lru_zone_size[MAX_NR_ZONES][NR_LRU_LISTS];
+	unsigned long		max_nr_base_pages;
 
 	struct mem_cgroup_reclaim_iter	iter[DEF_PRIORITY + 1];
 
