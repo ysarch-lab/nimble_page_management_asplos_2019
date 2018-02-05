@@ -360,6 +360,7 @@
 437	common	openat2			__x64_sys_openat2
 438	common	pidfd_getfd		__x64_sys_pidfd_getfd
 439	common	exchange_pages	__x64_sys_exchange_pages
+440	common	mm_manage		__x64_sys_mm_manage
 
 #
 # x32-specific system call numbers start at 512 to avoid cache impact
