@@ -340,6 +340,7 @@
 331	common	pkey_free		sys_pkey_free
 332	common	statx			sys_statx
 333	common	exchange_pages	sys_exchange_pages
+334	common	mm_manage		sys_mm_manage
 
 #
 # x32-specific system call numbers start at 512 to avoid cache impact

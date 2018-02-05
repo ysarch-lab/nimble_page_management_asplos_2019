@@ -945,4 +945,9 @@ asmlinkage long sys_exchange_pages(pid_t pid, unsigned long nr_pages,
 				const void __user * __user *to_pages,
 				int __user *status,
 				int flags);
+asmlinkage long sys_mm_manage(pid_t pid, unsigned long nr_pages,
+				unsigned long maxnode,
+				const unsigned long __user *old_nodes,
+				const unsigned long __user *new_nodes,
+				int flags);
 #endif

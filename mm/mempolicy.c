@@ -1234,7 +1234,7 @@ static long do_mbind(unsigned long start, unsigned long len,
  */
 
 /* Copy a node mask from user space. */
-static int get_nodes(nodemask_t *nodes, const unsigned long __user *nmask,
+int get_nodes(nodemask_t *nodes, const unsigned long __user *nmask,
 		     unsigned long maxnode)
 {
 	unsigned long k;
