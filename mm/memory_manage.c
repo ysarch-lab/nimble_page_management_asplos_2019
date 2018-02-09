@@ -95,10 +95,10 @@ static unsigned long isolate_pages_from_lru_list(pg_data_t *pgdat,
 	enum lru_list lru;
 	unsigned long nr_all_taken = 0;
 
+	lru_add_drain_all();
+
 	if (nr_pages == ULONG_MAX)
 		nr_pages = memcg_size_node(memcg, pgdat->node_id);
-
-	lru_add_drain_all();
 
 	for_each_evictable_lru(lru) {
 		unsigned long nr_scanned, nr_taken;
@@ -162,6 +162,8 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 			memcg, nr_pages, &from_page_list,
 			move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_HOT_PAGES);
 
+	pr_debug("%ld pages isolated at from node: %d\n", nr_isolated_from_pages, from_nid);
+
 	if (max_nr_pages_to_node != ULONG_MAX &&
 		max_nr_pages_to_node < (nr_pages_to_node + nr_isolated_from_pages)) {
 		unsigned long nr_isolated_to_pages;
@@ -172,6 +174,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 				nr_isolated_from_pages + nr_pages_to_node - max_nr_pages_to_node,
 				&to_page_list,
 				move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_COLD_PAGES);
+		pr_debug("%lu pages isolated at to node: %d\n", nr_isolated_to_pages, to_nid);
 
 		if (!list_empty(&to_page_list)) {
 			int err;
@@ -187,6 +190,18 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 					MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
 					(migrate_dma ? MIGRATE_DMA : MIGRATE_SINGLETHREAD),
 					MR_SYSCALL);
+
+			if (err) {
+				unsigned long num = 0;
+				struct page *page;
+
+				list_for_each_entry(page, &to_page_list, lru)
+					num++;
+				pr_debug("%lu pages failed to migrate from %d to %d\n",
+					num, to_nid, from_nid);
+
+				putback_movable_pages(&to_page_list);
+			}
 		}
 	}
 
@@ -205,6 +220,16 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 				MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
 				(migrate_dma ? MIGRATE_DMA : MIGRATE_SINGLETHREAD),
 				MR_SYSCALL);
+		if (err) {
+			unsigned long num = 0;
+			struct page *page;
+
+			list_for_each_entry(page, &from_page_list, lru)
+				num++;
+			pr_debug("%lu pages failed to migrate from %d to %d\n",
+				num, from_nid, to_nid);
+			putback_movable_pages(&from_page_list);
+		}
 	}
 
 
