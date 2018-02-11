@@ -37,7 +37,9 @@ static inline unsigned long memcg_max_size_node(struct mem_cgroup *memcg, int ni
 }
 
 static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
-		struct lruvec *lruvec, struct list_head *dst,
+		struct lruvec *lruvec,
+		struct list_head *dst_base_page,
+		struct list_head *dst_huge_page,
 		unsigned long *nr_scanned,
 		isolate_mode_t mode, enum lru_list lru)
 {
@@ -69,7 +71,10 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			nr_pages = hpage_nr_pages(page);
 			nr_taken += nr_pages;
 			nr_zone_taken[page_zonenum(page)] += nr_pages;
-			list_move(&page->lru, dst);
+			if (nr_pages == 1)
+				list_move(&page->lru, dst_base_page);
+			else
+				list_move(&page->lru, dst_huge_page);
 			break;
 
 		case -EBUSY:
@@ -89,7 +94,9 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 
 static unsigned long isolate_pages_from_lru_list(pg_data_t *pgdat,
 		struct mem_cgroup *memcg, unsigned long nr_pages,
-		struct list_head *page_list, enum isolate_action action)
+		struct list_head *base_page_list,
+		struct list_head *huge_page_list,
+		enum isolate_action action)
 {
 	struct lruvec *lruvec = mem_cgroup_lruvec(pgdat, memcg);
 	enum lru_list lru;
@@ -111,8 +118,8 @@ static unsigned long isolate_pages_from_lru_list(pg_data_t *pgdat,
 
 		spin_lock_irq(&pgdat->lru_lock);
 
-		nr_taken = isolate_lru_pages(nr_pages, lruvec, page_list,
-						 &nr_scanned, 0, lru);
+		nr_taken = isolate_lru_pages(nr_pages, lruvec, base_page_list,
+					huge_page_list, &nr_scanned, 0, lru);
 
 		__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
 
@@ -125,6 +132,38 @@ static unsigned long isolate_pages_from_lru_list(pg_data_t *pgdat,
 	}
 
 	return nr_all_taken;
+}
+
+static void migrate_to_node(struct list_head *page_list, int nid,
+		enum migrate_mode mode)
+{
+	bool migrate_concur = mode & MIGRATE_CONCUR;
+	int from_nid;
+	int err;
+
+	if (list_empty(page_list))
+		return;
+
+	from_nid = page_to_nid(list_first_entry(page_list, struct page, lru));
+
+	if (migrate_concur)
+		err = migrate_pages_concur(page_list, alloc_new_node_page,
+			NULL, nid, mode, MR_SYSCALL);
+	else
+		err = migrate_pages(page_list, alloc_new_node_page,
+			NULL, nid, mode, MR_SYSCALL);
+
+	if (err) {
+		unsigned long num = 0;
+		struct page *page;
+
+		list_for_each_entry(page, page_list, lru)
+			num++;
+		pr_debug("%lu pages failed to migrate from %d to %d\n",
+			num, from_nid, nid);
+
+		putback_movable_pages(page_list);
+	}
 }
 
 static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
@@ -142,7 +181,12 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	unsigned long nr_isolated_from_pages;
 	unsigned long max_nr_pages_to_node, nr_pages_to_node;
 	int from_nid, to_nid;
-	LIST_HEAD(from_page_list);
+	enum migrate_mode mode = MIGRATE_SYNC |
+		(migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
+		(migrate_dma ? MIGRATE_DMA : MIGRATE_SINGLETHREAD) |
+		(migrate_concur ? MIGRATE_CONCUR : MIGRATE_SINGLETHREAD);
+	LIST_HEAD(from_base_page_list);
+	LIST_HEAD(from_huge_page_list);
 
 	VM_BUG_ON(!memcg);
 	/* Let's handle simplest situation first */
@@ -159,7 +203,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 
 
 	nr_isolated_from_pages = isolate_pages_from_lru_list(NODE_DATA(from_nid),
-			memcg, nr_pages, &from_page_list,
+			memcg, nr_pages, &from_base_page_list, &from_huge_page_list,
 			move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_HOT_PAGES);
 
 	pr_debug("%ld pages isolated at from node: %d\n", nr_isolated_from_pages, from_nid);
@@ -167,71 +211,39 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	if (max_nr_pages_to_node != ULONG_MAX &&
 		max_nr_pages_to_node < (nr_pages_to_node + nr_isolated_from_pages)) {
 		unsigned long nr_isolated_to_pages;
-		LIST_HEAD(to_page_list);
+		LIST_HEAD(to_base_page_list);
+		LIST_HEAD(to_huge_page_list);
 		/* isolate pages on to node as well  */
 		nr_isolated_to_pages = isolate_pages_from_lru_list(NODE_DATA(to_nid),
 				memcg,
 				nr_isolated_from_pages + nr_pages_to_node - max_nr_pages_to_node,
-				&to_page_list,
+				&to_base_page_list, &to_huge_page_list,
 				move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_COLD_PAGES);
 		pr_debug("%lu pages isolated at to node: %d\n", nr_isolated_to_pages, to_nid);
-
-		if (!list_empty(&to_page_list)) {
-			int err;
-			if (migrate_concur)
-				err = migrate_pages_concur(&to_page_list, alloc_new_node_page,
-					NULL, from_nid,
-					MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
-					(migrate_dma ? MIGRATE_DMA : MIGRATE_SINGLETHREAD),
-					MR_SYSCALL);
-			else
-				err = migrate_pages(&to_page_list, alloc_new_node_page,
-					NULL, from_nid,
-					MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
-					(migrate_dma ? MIGRATE_DMA : MIGRATE_SINGLETHREAD),
-					MR_SYSCALL);
-
-			if (err) {
-				unsigned long num = 0;
-				struct page *page;
-
-				list_for_each_entry(page, &to_page_list, lru)
-					num++;
-				pr_debug("%lu pages failed to migrate from %d to %d\n",
-					num, to_nid, from_nid);
-
-				putback_movable_pages(&to_page_list);
-			}
+		if (migrate_mt || migrate_concur) {
+			migrate_to_node(&to_base_page_list, from_nid, mode & ~MIGRATE_MT);
+			migrate_to_node(&to_huge_page_list, from_nid, mode);
+		} else {
+			/* migrate base pages and THPs together if no opt is used */
+			if (!list_empty(&to_huge_page_list)) {
+				list_splice(&to_base_page_list, &to_huge_page_list);
+				migrate_to_node(&to_huge_page_list, from_nid, mode);
+			} else
+				migrate_to_node(&to_base_page_list, from_nid, mode);
 		}
 	}
 
-
-	if (!list_empty(&from_page_list)) {
-		int err;
-		if (migrate_concur)
-			err = migrate_pages_concur(&from_page_list, alloc_new_node_page,
-				NULL, to_nid,
-				MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
-				(migrate_dma ? MIGRATE_DMA : MIGRATE_SINGLETHREAD),
-				MR_SYSCALL);
-		else
-			err = migrate_pages(&from_page_list, alloc_new_node_page,
-				NULL, to_nid,
-				MIGRATE_SYNC | (migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
-				(migrate_dma ? MIGRATE_DMA : MIGRATE_SINGLETHREAD),
-				MR_SYSCALL);
-		if (err) {
-			unsigned long num = 0;
-			struct page *page;
-
-			list_for_each_entry(page, &from_page_list, lru)
-				num++;
-			pr_debug("%lu pages failed to migrate from %d to %d\n",
-				num, from_nid, to_nid);
-			putback_movable_pages(&from_page_list);
-		}
+	if (migrate_mt || migrate_concur) {
+		migrate_to_node(&from_base_page_list, to_nid, mode & ~MIGRATE_MT);
+		migrate_to_node(&from_huge_page_list, to_nid, mode);
+	} else {
+		/* migrate base pages and THPs together if no opt is used */
+		if (!list_empty(&from_huge_page_list)) {
+			list_splice(&from_base_page_list, &from_huge_page_list);
+			migrate_to_node(&from_huge_page_list, to_nid, mode);
+		} else
+			migrate_to_node(&from_base_page_list, to_nid, mode);
 	}
-
 
 	return err;
 }
