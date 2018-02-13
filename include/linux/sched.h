@@ -79,6 +79,10 @@ struct move_pages_breakdown {
 };
 #endif
 
+struct page_migration_stats {
+	unsigned long base_page_under_migration_jiffies;
+	unsigned long huge_page_under_migration_jiffies;
+};
 
 /*
  * Task state bitmask. NOTE! These bits are also
@@ -803,6 +807,8 @@ struct task_struct {
 #ifdef CONFIG_PAGE_MIGRATION_PROFILE
 	struct move_pages_breakdown move_pages_breakdown;
 #endif
+
+	struct page_migration_stats page_migration_stats;
 
 #ifdef CONFIG_POSIX_TIMERS
 	struct task_cputime		cputime_expires;

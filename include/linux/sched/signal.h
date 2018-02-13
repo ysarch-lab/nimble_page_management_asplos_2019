@@ -179,6 +179,7 @@ struct signal_struct {
 	unsigned long maxrss, cmaxrss;
 	struct task_io_accounting ioac;
 
+	struct page_migration_stats page_migration_stats;
 	/*
 	 * Cumulative ns of schedule CPU time fo dead threads in the
 	 * group, not including a zombie group leader, (This only differs

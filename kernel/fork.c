@@ -1435,6 +1435,8 @@ static int copy_signal(unsigned long clone_flags, struct task_struct *tsk)
 	sig->oom_score_adj = current->signal->oom_score_adj;
 	sig->oom_score_adj_min = current->signal->oom_score_adj_min;
 
+	sig->page_migration_stats = (struct page_migration_stats){0};
+
 	mutex_init(&sig->cred_guard_mutex);
 
 	return 0;
@@ -1652,6 +1654,7 @@ static __latent_entropy struct task_struct *copy_process(
 #ifdef CONFIG_PAGE_MIGRATION_PROFILE
 	p->move_pages_breakdown = (struct move_pages_breakdown){0};
 #endif
+	p->page_migration_stats = (struct page_migration_stats){0};
 
 	p->utime = p->stime = p->gtime = 0;
 #ifdef CONFIG_ARCH_HAS_SCALED_CPUTIME

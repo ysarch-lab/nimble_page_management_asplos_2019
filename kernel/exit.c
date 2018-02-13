@@ -152,6 +152,18 @@ static void __exit_signal(struct task_struct *tsk)
 	task_io_accounting_add(&sig->ioac, &tsk->ioac);
 	sig->sum_sched_runtime += tsk->se.sum_exec_runtime;
 	sig->nr_threads--;
+
+#define ADD_PAGE_MIGRATION_STATS(dst, src)\
+		do {\
+			dst.base_page_under_migration_jiffies += src.base_page_under_migration_jiffies;\
+			dst.huge_page_under_migration_jiffies += src.huge_page_under_migration_jiffies;\
+		} while (0);
+
+		ADD_PAGE_MIGRATION_STATS(sig->page_migration_stats,
+				tsk->page_migration_stats);
+
+#undef ADD_PAGE_MIGRATION_STATS
+
 	__unhash_process(tsk, group_dead);
 	write_sequnlock(&sig->stats_lock);
 
@@ -1130,6 +1142,20 @@ static int wait_task_zombie(struct wait_opts *wo, struct task_struct *p)
 		psig->coublock +=
 			task_io_get_oublock(p) +
 			sig->oublock + sig->coublock;
+
+#define ADD_PAGE_MIGRATION_STATS(dst, src)\
+		do {\
+			dst.base_page_under_migration_jiffies += src.base_page_under_migration_jiffies;\
+			dst.huge_page_under_migration_jiffies += src.huge_page_under_migration_jiffies;\
+		} while (0);
+
+		ADD_PAGE_MIGRATION_STATS(psig->page_migration_stats,
+				p->page_migration_stats);
+		ADD_PAGE_MIGRATION_STATS(psig->page_migration_stats,
+				sig->page_migration_stats);
+
+#undef ADD_PAGE_MIGRATION_STATS
+
 		maxrss = max(sig->maxrss, sig->cmaxrss);
 		if (psig->cmaxrss < maxrss)
 			psig->cmaxrss = maxrss;

@@ -292,6 +292,62 @@ static int proc_pid_move_pages_breakdown(struct seq_file *m, struct pid_namespac
 }
 #endif
 
+static int proc_pid_page_migration_stats(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
+{
+	struct task_struct *t = task;
+	struct page_migration_stats stats;
+
+	stats = t->page_migration_stats;
+
+#define SHOW_PAGE_MIGRATION_STATS(var) \
+		jiffies_to_msecs(var.base_page_under_migration_jiffies), \
+		jiffies_to_msecs(var.huge_page_under_migration_jiffies)
+
+	seq_printf(m,
+		"WaitBasePageMigration_ms %u\n"
+		"WaitHugePageMigration_ms %u\n",
+
+		SHOW_PAGE_MIGRATION_STATS(stats)
+
+		);
+
+#undef SHOW_PAGE_MIGRATION_STATS
+
+	return 0;
+}
+
+static int proc_pid_child_stats(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
+{
+	struct task_struct *t = task;
+	unsigned long flags;
+
+	if (lock_task_sighand(t, &flags)) {
+		struct signal_struct *sig = t->signal;
+		struct page_migration_stats child_stats;
+
+		child_stats = sig->page_migration_stats;
+		unlock_task_sighand(t, &flags);
+
+#define SHOW_PAGE_MIGRATION_STATS(var) \
+		jiffies_to_msecs(var.base_page_under_migration_jiffies), \
+		jiffies_to_msecs(var.huge_page_under_migration_jiffies)
+
+		seq_printf(m,
+			"WaitBasePageMigration_ms %u\n"
+			"WaitHugePageMigration_ms %u\n",
+
+			SHOW_PAGE_MIGRATION_STATS(child_stats)
+
+			);
+
+#undef SHOW_PAGE_MIGRATION_STATS
+	}
+
+	return 0;
+}
+
 static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
 				     size_t _count, loff_t *pos)
 {
@@ -3050,6 +3106,8 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_PAGE_MIGRATION_PROFILE
 	ONE("move_pages_breakdown",       S_IRUGO, proc_pid_move_pages_breakdown),
 #endif
+	ONE("child_stats", S_IRUGO, proc_pid_child_stats),
+	ONE("page_migration_stats", S_IRUGO, proc_pid_page_migration_stats),
 	REG("cmdline",    S_IRUGO, proc_pid_cmdline_ops),
 	ONE("stat",       S_IRUGO, proc_tgid_stat),
 	ONE("statm",      S_IRUGO, proc_pid_statm),
@@ -3445,6 +3503,8 @@ static const struct pid_entry tid_base_stuff[] = {
 #ifdef CONFIG_PAGE_MIGRATION_PROFILE
 	ONE("move_pages_breakdown",       S_IRUGO, proc_pid_move_pages_breakdown),
 #endif
+	ONE("child_stats", S_IRUGO, proc_pid_child_stats),
+	ONE("page_migration_stats", S_IRUGO, proc_pid_page_migration_stats),
 	REG("cmdline",   S_IRUGO, proc_pid_cmdline_ops),
 	ONE("stat",      S_IRUGO, proc_tid_stat),
 	ONE("statm",     S_IRUGO, proc_pid_statm),

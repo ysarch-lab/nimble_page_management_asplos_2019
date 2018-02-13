@@ -355,9 +355,19 @@ out:
 void migration_entry_wait(struct mm_struct *mm, pmd_t *pmd,
 				unsigned long address)
 {
+	unsigned long enter_jiffies = jiffies;
+	struct task_struct *tsk;
+
 	spinlock_t *ptl = pte_lockptr(mm, pmd);
 	pte_t *ptep = pte_offset_map(pmd, address);
 	__migration_entry_wait(mm, ptep, ptl);
+
+	enter_jiffies = jiffies - enter_jiffies;
+	rcu_read_lock();
+	tsk = rcu_dereference(mm->owner);
+	rcu_read_unlock();
+	tsk->page_migration_stats.base_page_under_migration_jiffies +=
+		enter_jiffies;
 }
 
 void migration_entry_wait_huge(struct vm_area_struct *vma,
@@ -372,6 +382,8 @@ void pmd_migration_entry_wait(struct mm_struct *mm, pmd_t *pmd)
 {
 	spinlock_t *ptl;
 	struct page *page;
+	unsigned long enter_jiffies = jiffies;
+	struct task_struct *tsk;
 
 	ptl = pmd_lock(mm, pmd);
 	if (!is_pmd_migration_entry(*pmd))
@@ -382,9 +394,23 @@ void pmd_migration_entry_wait(struct mm_struct *mm, pmd_t *pmd)
 	spin_unlock(ptl);
 	wait_on_page_locked(page);
 	put_page(page);
+
+	enter_jiffies = jiffies - enter_jiffies;
+	rcu_read_lock();
+	tsk = rcu_dereference(mm->owner);
+	rcu_read_unlock();
+	tsk->page_migration_stats.huge_page_under_migration_jiffies +=
+		enter_jiffies;
 	return;
 unlock:
 	spin_unlock(ptl);
+
+	enter_jiffies = jiffies - enter_jiffies;
+	rcu_read_lock();
+	tsk = rcu_dereference(mm->owner);
+	rcu_read_unlock();
+	tsk->page_migration_stats.huge_page_under_migration_jiffies +=
+		enter_jiffies;
 }
 #endif
 
