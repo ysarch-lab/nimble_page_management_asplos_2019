@@ -300,19 +300,28 @@ static int proc_pid_page_migration_stats(struct seq_file *m, struct pid_namespac
 
 	stats = t->page_migration_stats;
 
+#define SHOW_PAGE_MIGRATION_COUNTERS(var) \
+		var.nr_base_pages, \
+		var.nr_huge_pages
+
 #define SHOW_PAGE_MIGRATION_STATS(var) \
 		jiffies_to_msecs(var.base_page_under_migration_jiffies), \
-		jiffies_to_msecs(var.huge_page_under_migration_jiffies)
+		jiffies_to_msecs(var.huge_page_under_migration_jiffies), \
+		SHOW_PAGE_MIGRATION_COUNTERS(var.f2s), \
+		SHOW_PAGE_MIGRATION_COUNTERS(var.s2f)
+
 
 	seq_printf(m,
 		"WaitBasePageMigration_ms %u\n"
-		"WaitHugePageMigration_ms %u\n",
+		"WaitHugePageMigration_ms %u\n"
+		"Fast2SlowBasePageMigrations_nr_base_pages %lu\n"
+		"Fast2SlowHugePageMigrations_nr_base_pages %lu\n"
+		"Slow2FastBasePageMigrations_nr_base_pages %lu\n"
+		"Slow2FastHugePageMigrations_nr_base_pages %lu\n",
 
 		SHOW_PAGE_MIGRATION_STATS(stats)
 
 		);
-
-#undef SHOW_PAGE_MIGRATION_STATS
 
 	return 0;
 }
@@ -330,13 +339,13 @@ static int proc_pid_child_stats(struct seq_file *m, struct pid_namespace *ns,
 		child_stats = sig->page_migration_stats;
 		unlock_task_sighand(t, &flags);
 
-#define SHOW_PAGE_MIGRATION_STATS(var) \
-		jiffies_to_msecs(var.base_page_under_migration_jiffies), \
-		jiffies_to_msecs(var.huge_page_under_migration_jiffies)
-
 		seq_printf(m,
 			"WaitBasePageMigration_ms %u\n"
-			"WaitHugePageMigration_ms %u\n",
+			"WaitHugePageMigration_ms %u\n"
+			"Fast2SlowBasePageMigrations_nr_base_pages %lu\n"
+			"Fast2SlowHugePageMigrations_nr_base_pages %lu\n"
+			"Slow2FastBasePageMigrations_nr_base_pages %lu\n"
+			"Slow2FastHugePageMigrations_nr_base_pages %lu\n",
 
 			SHOW_PAGE_MIGRATION_STATS(child_stats)
 

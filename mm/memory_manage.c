@@ -41,6 +41,8 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		struct list_head *dst_base_page,
 		struct list_head *dst_huge_page,
 		unsigned long *nr_scanned,
+		unsigned long *nr_taken_base_page,
+		unsigned long *nr_taken_huge_page,
 		isolate_mode_t mode, enum lru_list lru)
 {
 	struct list_head *src = &lruvec->lists[lru];
@@ -71,10 +73,13 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			nr_pages = hpage_nr_pages(page);
 			nr_taken += nr_pages;
 			nr_zone_taken[page_zonenum(page)] += nr_pages;
-			if (nr_pages == 1)
+			if (nr_pages == 1) {
 				list_move(&page->lru, dst_base_page);
-			else
+				*nr_taken_base_page += nr_pages;
+			} else {
 				list_move(&page->lru, dst_huge_page);
+				*nr_taken_huge_page += nr_pages;
+			}
 			break;
 
 		case -EBUSY:
@@ -96,6 +101,8 @@ static unsigned long isolate_pages_from_lru_list(pg_data_t *pgdat,
 		struct mem_cgroup *memcg, unsigned long nr_pages,
 		struct list_head *base_page_list,
 		struct list_head *huge_page_list,
+		unsigned long *nr_taken_base_page,
+		unsigned long *nr_taken_huge_page,
 		enum isolate_action action)
 {
 	struct lruvec *lruvec = mem_cgroup_lruvec(pgdat, memcg);
@@ -119,7 +126,10 @@ static unsigned long isolate_pages_from_lru_list(pg_data_t *pgdat,
 		spin_lock_irq(&pgdat->lru_lock);
 
 		nr_taken = isolate_lru_pages(nr_pages, lruvec, base_page_list,
-					huge_page_list, &nr_scanned, 0, lru);
+					huge_page_list, &nr_scanned,
+					nr_taken_base_page,
+					nr_taken_huge_page,
+					0, lru);
 
 		__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
 
@@ -134,15 +144,16 @@ static unsigned long isolate_pages_from_lru_list(pg_data_t *pgdat,
 	return nr_all_taken;
 }
 
-static void migrate_to_node(struct list_head *page_list, int nid,
+static int migrate_to_node(struct list_head *page_list, int nid,
 		enum migrate_mode mode)
 {
 	bool migrate_concur = mode & MIGRATE_CONCUR;
+	int num = 0;
 	int from_nid;
 	int err;
 
 	if (list_empty(page_list))
-		return;
+		return num;
 
 	from_nid = page_to_nid(list_first_entry(page_list, struct page, lru));
 
@@ -154,16 +165,16 @@ static void migrate_to_node(struct list_head *page_list, int nid,
 			NULL, nid, mode, MR_SYSCALL);
 
 	if (err) {
-		unsigned long num = 0;
 		struct page *page;
 
 		list_for_each_entry(page, page_list, lru)
-			num++;
-		pr_debug("%lu pages failed to migrate from %d to %d\n",
+			num += hpage_nr_pages(page);
+		pr_debug("%d pages failed to migrate from %d to %d\n",
 			num, from_nid, nid);
 
 		putback_movable_pages(page_list);
 	}
+	return num;
 }
 
 static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
@@ -179,6 +190,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	struct mem_cgroup *memcg = mem_cgroup_from_task(p);
 	int err = 0;
 	unsigned long nr_isolated_from_pages;
+	unsigned long nr_isolated_from_base_pages = 0, nr_isolated_from_huge_pages = 0;
 	unsigned long max_nr_pages_to_node, nr_pages_to_node;
 	int from_nid, to_nid;
 	enum migrate_mode mode = MIGRATE_SYNC |
@@ -204,6 +216,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 
 	nr_isolated_from_pages = isolate_pages_from_lru_list(NODE_DATA(from_nid),
 			memcg, nr_pages, &from_base_page_list, &from_huge_page_list,
+			&nr_isolated_from_base_pages, &nr_isolated_from_huge_pages,
 			move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_HOT_PAGES);
 
 	pr_debug("%ld pages isolated at from node: %d\n", nr_isolated_from_pages, from_nid);
@@ -211,6 +224,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	if (max_nr_pages_to_node != ULONG_MAX &&
 		max_nr_pages_to_node < (nr_pages_to_node + nr_isolated_from_pages)) {
 		unsigned long nr_isolated_to_pages;
+		unsigned long nr_isolated_to_base_pages = 0, nr_isolated_to_huge_pages = 0;
 		LIST_HEAD(to_base_page_list);
 		LIST_HEAD(to_huge_page_list);
 		/* isolate pages on to node as well  */
@@ -218,32 +232,55 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 				memcg,
 				nr_isolated_from_pages + nr_pages_to_node - max_nr_pages_to_node,
 				&to_base_page_list, &to_huge_page_list,
+				&nr_isolated_to_base_pages, &nr_isolated_to_huge_pages,
 				move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_COLD_PAGES);
 		pr_debug("%lu pages isolated at to node: %d\n", nr_isolated_to_pages, to_nid);
 		if (migrate_mt || migrate_concur) {
-			migrate_to_node(&to_base_page_list, from_nid, mode & ~MIGRATE_MT);
-			migrate_to_node(&to_huge_page_list, from_nid, mode);
+			nr_isolated_to_base_pages -=
+				migrate_to_node(&to_base_page_list, from_nid, mode & ~MIGRATE_MT);
+			nr_isolated_to_huge_pages -=
+				migrate_to_node(&to_huge_page_list, from_nid, mode);
 		} else {
+			nr_isolated_to_base_pages -=
+				migrate_to_node(&to_base_page_list, from_nid, mode);
+			nr_isolated_to_huge_pages -=
+				migrate_to_node(&to_huge_page_list, from_nid, mode);
+#if 0
 			/* migrate base pages and THPs together if no opt is used */
 			if (!list_empty(&to_huge_page_list)) {
 				list_splice(&to_base_page_list, &to_huge_page_list);
 				migrate_to_node(&to_huge_page_list, from_nid, mode);
 			} else
 				migrate_to_node(&to_base_page_list, from_nid, mode);
+#endif
 		}
+
+		p->page_migration_stats.f2s.nr_base_pages += nr_isolated_to_base_pages;
+		p->page_migration_stats.f2s.nr_huge_pages += nr_isolated_to_huge_pages;
 	}
 
 	if (migrate_mt || migrate_concur) {
-		migrate_to_node(&from_base_page_list, to_nid, mode & ~MIGRATE_MT);
-		migrate_to_node(&from_huge_page_list, to_nid, mode);
+		nr_isolated_from_base_pages -=
+			migrate_to_node(&from_base_page_list, to_nid, mode & ~MIGRATE_MT);
+		nr_isolated_from_huge_pages -=
+			migrate_to_node(&from_huge_page_list, to_nid, mode);
 	} else {
+		nr_isolated_from_base_pages -=
+			migrate_to_node(&from_base_page_list, to_nid, mode);
+		nr_isolated_from_huge_pages -=
+			migrate_to_node(&from_huge_page_list, to_nid, mode);
+#if 0
 		/* migrate base pages and THPs together if no opt is used */
 		if (!list_empty(&from_huge_page_list)) {
 			list_splice(&from_base_page_list, &from_huge_page_list);
 			migrate_to_node(&from_huge_page_list, to_nid, mode);
 		} else
 			migrate_to_node(&from_base_page_list, to_nid, mode);
+#endif
 	}
+
+	p->page_migration_stats.s2f.nr_base_pages += nr_isolated_from_base_pages;
+	p->page_migration_stats.s2f.nr_huge_pages += nr_isolated_from_huge_pages;
 
 	return err;
 }
