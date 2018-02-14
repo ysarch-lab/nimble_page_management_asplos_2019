@@ -344,6 +344,14 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	return err;
 }
 
+static int shrink_lists(struct task_struct *p, struct mm_struct *mm)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_task(p);
+	int err = 0;
+
+	return err;
+}
+
 SYSCALL_DEFINE6(mm_manage, pid_t, pid, unsigned long, nr_pages,
 		unsigned long, maxnode,
 		const unsigned long __user *, old_nodes,
@@ -374,10 +382,13 @@ SYSCALL_DEFINE6(mm_manage, pid_t, pid, unsigned long, nr_pages,
 		goto out;
 
 	/* Check flags */
-	if (flags & ~(MPOL_MF_MOVE_MT|
+	if (flags & ~(
+				  MPOL_MF_MOVE|
+				  MPOL_MF_MOVE_MT|
 				  MPOL_MF_MOVE_DMA|
 				  MPOL_MF_MOVE_CONCUR|
 				  MPOL_MF_EXCHANGE|
+				  MPOL_MF_SHRINK_LISTS|
 				  MPOL_MF_MOVE_ALL))
 		return -EINVAL;
 
@@ -421,7 +432,11 @@ SYSCALL_DEFINE6(mm_manage, pid_t, pid, unsigned long, nr_pages,
 		goto out;
 	}
 
-	err = do_mm_manage(task, mm, old, new, nr_pages, flags);
+	if (flags & MPOL_MF_SHRINK_LISTS)
+		shrink_lists(task, mm);
+
+	if (flags & MPOL_MF_MOVE)
+		err = do_mm_manage(task, mm, old, new, nr_pages, flags);
 
 	mmput(mm);
 out:
