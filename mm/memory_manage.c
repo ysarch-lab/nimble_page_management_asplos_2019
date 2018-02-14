@@ -177,6 +177,45 @@ static int migrate_to_node(struct list_head *page_list, int nid,
 	return num;
 }
 
+static inline int _putback_overflow_pages(unsigned long max_nr_pages,
+		struct list_head *page_list)
+{
+	struct page *page;
+	LIST_HEAD(putback_list);
+
+	list_for_each_entry(page, page_list, lru) {
+		int nr_pages = hpage_nr_pages(page);
+		if (max_nr_pages <= nr_pages) {
+			max_nr_pages = 0;
+			break;
+		}
+		max_nr_pages -= nr_pages;
+	}
+
+	if (&page->lru != page_list) {
+		list_cut_position(&putback_list, page_list, &page->lru);
+		putback_movable_pages(page_list);
+		list_splice(&putback_list, page_list);
+	}
+
+	return max_nr_pages;
+}
+
+static int putback_overflow_pages(unsigned long max_nr_base_pages,
+		unsigned long max_nr_huge_pages,
+		struct list_head *base_page_list,
+		struct list_head *huge_page_list)
+{
+	/*
+	 * counting pages in page lists and substract the number from max_nr_*
+	 * when max_nr_* go to zero, drop the remaining pages
+	 */
+	max_nr_huge_pages += _putback_overflow_pages(max_nr_base_pages,
+			base_page_list);
+	_putback_overflow_pages(max_nr_huge_pages, huge_page_list);
+	return 0;
+}
+
 static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 		const nodemask_t *from, const nodemask_t *to,
 		unsigned long nr_pages, int flags)
@@ -191,12 +230,19 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	int err = 0;
 	unsigned long nr_isolated_from_pages;
 	unsigned long nr_isolated_from_base_pages = 0, nr_isolated_from_huge_pages = 0;
+	unsigned long nr_isolated_to_pages;
+	/* in case no migration from to node, we migrate all isolated pages from
+	 * from node  */
+	unsigned long nr_isolated_to_base_pages = ULONG_MAX,
+				  nr_isolated_to_huge_pages = ULONG_MAX;
 	unsigned long max_nr_pages_to_node, nr_pages_to_node;
 	int from_nid, to_nid;
 	enum migrate_mode mode = MIGRATE_SYNC |
 		(migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
 		(migrate_dma ? MIGRATE_DMA : MIGRATE_SINGLETHREAD) |
 		(migrate_concur ? MIGRATE_CONCUR : MIGRATE_SINGLETHREAD);
+	enum isolate_action from_action =
+		move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_HOT_PAGES;
 	LIST_HEAD(from_base_page_list);
 	LIST_HEAD(from_huge_page_list);
 
@@ -213,20 +259,28 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	max_nr_pages_to_node = memcg_max_size_node(memcg, to_nid);
 	nr_pages_to_node = memcg_size_node(memcg, to_nid);
 
+	/* do not migrate in more pages than to node can hold */
+	nr_pages = min_t(unsigned long, max_nr_pages_to_node, nr_pages);
+
+	/* if to node has enough space, migrate all possible pages in from node */
+	if (nr_pages != ULONG_MAX &&
+		nr_pages + nr_pages_to_node < max_nr_pages_to_node)
+		from_action = ISOLATE_HOT_AND_COLD_PAGES;
 
 	nr_isolated_from_pages = isolate_pages_from_lru_list(NODE_DATA(from_nid),
 			memcg, nr_pages, &from_base_page_list, &from_huge_page_list,
 			&nr_isolated_from_base_pages, &nr_isolated_from_huge_pages,
-			move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_HOT_PAGES);
+			from_action);
 
 	pr_debug("%ld pages isolated at from node: %d\n", nr_isolated_from_pages, from_nid);
 
 	if (max_nr_pages_to_node != ULONG_MAX &&
 		max_nr_pages_to_node < (nr_pages_to_node + nr_isolated_from_pages)) {
-		unsigned long nr_isolated_to_pages;
-		unsigned long nr_isolated_to_base_pages = 0, nr_isolated_to_huge_pages = 0;
 		LIST_HEAD(to_base_page_list);
 		LIST_HEAD(to_huge_page_list);
+
+		nr_isolated_to_base_pages = 0;
+		nr_isolated_to_huge_pages = 0;
 		/* isolate pages on to node as well  */
 		nr_isolated_to_pages = isolate_pages_from_lru_list(NODE_DATA(to_nid),
 				memcg,
@@ -259,6 +313,9 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 		p->page_migration_stats.f2s.nr_base_pages += nr_isolated_to_base_pages;
 		p->page_migration_stats.f2s.nr_huge_pages += nr_isolated_to_huge_pages;
 	}
+
+	putback_overflow_pages(nr_isolated_to_base_pages, nr_isolated_to_huge_pages,
+			&from_base_page_list, &from_huge_page_list);
 
 	if (migrate_mt || migrate_concur) {
 		nr_isolated_from_base_pages -=
