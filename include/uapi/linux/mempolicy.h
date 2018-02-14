@@ -52,6 +52,7 @@ enum {
 #define MPOL_MF_MOVE_MT  (1<<6)	/* Use multi-threaded page copy routine */
 #define MPOL_MF_MOVE_CONCUR  (1<<7)	/* Move pages in a batch */
 #define MPOL_MF_EXCHANGE	(1<<8)	/* Exchange pages */
+#define MPOL_MF_SHRINK_LISTS	(1<<9)	/* Exchange pages */
 
 #define MPOL_MF_VALID	(MPOL_MF_STRICT   | 	\
 			 MPOL_MF_MOVE     | 	\
