@@ -255,6 +255,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 #endif
 		}
 
+		p->page_migration_stats.f2s.nr_migrations += 1;
 		p->page_migration_stats.f2s.nr_base_pages += nr_isolated_to_base_pages;
 		p->page_migration_stats.f2s.nr_huge_pages += nr_isolated_to_huge_pages;
 	}
@@ -279,6 +280,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 #endif
 	}
 
+	p->page_migration_stats.s2f.nr_migrations += 1;
 	p->page_migration_stats.s2f.nr_base_pages += nr_isolated_from_base_pages;
 	p->page_migration_stats.s2f.nr_huge_pages += nr_isolated_from_huge_pages;
 

@@ -155,6 +155,7 @@ static void __exit_signal(struct task_struct *tsk)
 
 #define ADD_PAGE_MIGRATION_COUNTERS(dst, src)\
 	do { \
+		dst.nr_migrations += src.nr_migrations;\
 		dst.nr_base_pages += src.nr_base_pages;\
 		dst.nr_huge_pages += src.nr_huge_pages;\
 	} while (0);

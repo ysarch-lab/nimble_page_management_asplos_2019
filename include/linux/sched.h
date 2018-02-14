@@ -80,6 +80,7 @@ struct move_pages_breakdown {
 #endif
 
 struct page_migration_counters {
+	unsigned long nr_migrations;
 	unsigned long nr_base_pages;
 	unsigned long nr_huge_pages;
 };
