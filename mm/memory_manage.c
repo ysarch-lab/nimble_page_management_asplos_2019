@@ -49,6 +49,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 	unsigned long nr_taken = 0;
 	unsigned long nr_zone_taken[MAX_NR_ZONES] = { 0 };
 	unsigned long scan, total_scan, nr_pages;
+	LIST_HEAD(busy_list);
 
 	scan = 0;
 	for (total_scan = 0;
@@ -84,13 +85,15 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 
 		case -EBUSY:
 			/* else it is being freed elsewhere */
-			list_move(&page->lru, src);
+			list_move(&page->lru, &busy_list);
 			continue;
 
 		default:
 			BUG();
 		}
 	}
+	if (!list_empty(&busy_list))
+		list_splice(&busy_list, src);
 
 	*nr_scanned = total_scan;
 	update_lru_sizes(lruvec, lru, nr_zone_taken);
