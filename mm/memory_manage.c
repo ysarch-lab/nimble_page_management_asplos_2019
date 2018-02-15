@@ -317,8 +317,10 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 		p->page_migration_stats.f2s.nr_huge_pages += nr_isolated_to_huge_pages;
 	}
 
-	putback_overflow_pages(nr_isolated_to_base_pages, nr_isolated_to_huge_pages,
-			&from_base_page_list, &from_huge_page_list);
+	if (nr_isolated_to_base_pages != ULONG_MAX &&
+		nr_isolated_to_huge_pages != ULONG_MAX)
+		putback_overflow_pages(nr_isolated_to_base_pages, nr_isolated_to_huge_pages,
+				&from_base_page_list, &from_huge_page_list);
 
 	if (migrate_mt || migrate_concur) {
 		nr_isolated_from_base_pages -=
