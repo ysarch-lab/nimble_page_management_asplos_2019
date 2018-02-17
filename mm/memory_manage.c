@@ -186,21 +186,34 @@ static inline int _putback_overflow_pages(unsigned long max_nr_pages,
 	struct page *page;
 	LIST_HEAD(putback_list);
 
+	if (list_empty(page_list))
+		return max_nr_pages;
+
+	/* in case we need to drop the whole list */
+	page = list_first_entry(page_list, struct page, lru);
+	if (max_nr_pages <= (2 * hpage_nr_pages(page))) {
+		max_nr_pages = 0;
+		putback_movable_pages(page_list);
+		goto out;
+	}
+
 	list_for_each_entry(page, page_list, lru) {
 		int nr_pages = hpage_nr_pages(page);
-		if (max_nr_pages <= nr_pages) {
+		/* drop just one more page to avoid using up free space  */
+		if (max_nr_pages <= (2 * nr_pages)) {
 			max_nr_pages = 0;
 			break;
 		}
 		max_nr_pages -= nr_pages;
 	}
 
+	/* we did not scan all pages in page_list, we need to put back some */
 	if (&page->lru != page_list) {
 		list_cut_position(&putback_list, page_list, &page->lru);
 		putback_movable_pages(page_list);
 		list_splice(&putback_list, page_list);
 	}
-
+out:
 	return max_nr_pages;
 }
 
@@ -215,8 +228,7 @@ static int putback_overflow_pages(unsigned long max_nr_base_pages,
 	 */
 	max_nr_huge_pages += _putback_overflow_pages(max_nr_base_pages,
 			base_page_list);
-	_putback_overflow_pages(max_nr_huge_pages, huge_page_list);
-	return 0;
+	return _putback_overflow_pages(max_nr_huge_pages, huge_page_list);
 }
 
 static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
@@ -238,7 +250,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	 * from node  */
 	unsigned long nr_isolated_to_base_pages = ULONG_MAX,
 				  nr_isolated_to_huge_pages = ULONG_MAX;
-	unsigned long max_nr_pages_to_node, nr_pages_to_node;
+	unsigned long max_nr_pages_to_node, nr_pages_to_node, nr_free_pages_to_node;
 	int from_nid, to_nid;
 	enum migrate_mode mode = MIGRATE_SYNC |
 		(migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
@@ -262,12 +274,18 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	max_nr_pages_to_node = memcg_max_size_node(memcg, to_nid);
 	nr_pages_to_node = memcg_size_node(memcg, to_nid);
 
+	VM_BUG_ON(max_nr_pages_to_node < nr_pages_to_node);
+
+	nr_free_pages_to_node = max_nr_pages_to_node - nr_pages_to_node;
+
+	pr_debug("%ld free pages at to node: %d\n", nr_free_pages_to_node, to_nid);
+
 	/* do not migrate in more pages than to node can hold */
 	nr_pages = min_t(unsigned long, max_nr_pages_to_node, nr_pages);
 
 	/* if to node has enough space, migrate all possible pages in from node */
 	if (nr_pages != ULONG_MAX &&
-		nr_pages + nr_pages_to_node < max_nr_pages_to_node)
+		nr_pages < nr_free_pages_to_node)
 		from_action = ISOLATE_HOT_AND_COLD_PAGES;
 
 	nr_isolated_from_pages = isolate_pages_from_lru_list(NODE_DATA(from_nid),
@@ -278,7 +296,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	pr_debug("%ld pages isolated at from node: %d\n", nr_isolated_from_pages, from_nid);
 
 	if (max_nr_pages_to_node != ULONG_MAX &&
-		max_nr_pages_to_node < (nr_pages_to_node + nr_isolated_from_pages)) {
+		nr_free_pages_to_node < nr_isolated_from_pages) {
 		LIST_HEAD(to_base_page_list);
 		LIST_HEAD(to_huge_page_list);
 
@@ -287,7 +305,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 		/* isolate pages on to node as well  */
 		nr_isolated_to_pages = isolate_pages_from_lru_list(NODE_DATA(to_nid),
 				memcg,
-				nr_isolated_from_pages + nr_pages_to_node - max_nr_pages_to_node,
+				nr_isolated_from_pages - nr_free_pages_to_node,
 				&to_base_page_list, &to_huge_page_list,
 				&nr_isolated_to_base_pages, &nr_isolated_to_huge_pages,
 				move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_COLD_PAGES);
@@ -319,8 +337,24 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 
 	if (nr_isolated_to_base_pages != ULONG_MAX &&
 		nr_isolated_to_huge_pages != ULONG_MAX)
-		putback_overflow_pages(nr_isolated_to_base_pages, nr_isolated_to_huge_pages,
+		putback_overflow_pages(nr_free_pages_to_node/2 + nr_isolated_to_base_pages,
+				nr_free_pages_to_node/2 + nr_isolated_to_huge_pages,
 				&from_base_page_list, &from_huge_page_list);
+
+	do {
+		DEFINE_DYNAMIC_DEBUG_METADATA(descriptor, "check number of to-be-migrated pages");
+		if (DYNAMIC_DEBUG_BRANCH(descriptor)) {
+			struct page *page;
+			unsigned long nr_pages = 0;
+			list_for_each_entry(page, &from_base_page_list, lru) {
+				nr_pages += hpage_nr_pages(page);
+			}
+			list_for_each_entry(page, &from_huge_page_list, lru) {
+				nr_pages += hpage_nr_pages(page);
+			}
+			printk(KERN_DEBUG "%lu pages to be migrated to node: %d\n", nr_pages, to_nid);
+		}
+	} while (0);
 
 	if (migrate_mt || migrate_concur) {
 		nr_isolated_from_base_pages -=
