@@ -219,16 +219,28 @@ out:
 
 static int putback_overflow_pages(unsigned long max_nr_base_pages,
 		unsigned long max_nr_huge_pages,
+		long nr_free_pages,
 		struct list_head *base_page_list,
 		struct list_head *huge_page_list)
 {
+	if (nr_free_pages < 0) {
+		if ((-nr_free_pages) > max_nr_base_pages) {
+			nr_free_pages += max_nr_base_pages;
+			max_nr_base_pages = 0;
+		}
+
+		if ((-nr_free_pages) > max_nr_huge_pages) {
+			nr_free_pages = 0;
+			max_nr_base_pages = 0;
+		}
+	}
 	/*
 	 * counting pages in page lists and substract the number from max_nr_*
 	 * when max_nr_* go to zero, drop the remaining pages
 	 */
-	max_nr_huge_pages += _putback_overflow_pages(max_nr_base_pages,
+	max_nr_huge_pages += _putback_overflow_pages(nr_free_pages/2 + max_nr_base_pages,
 			base_page_list);
-	return _putback_overflow_pages(max_nr_huge_pages, huge_page_list);
+	return _putback_overflow_pages(nr_free_pages/2 + max_nr_huge_pages, huge_page_list);
 }
 
 static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
@@ -250,7 +262,8 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	 * from node  */
 	unsigned long nr_isolated_to_base_pages = ULONG_MAX,
 				  nr_isolated_to_huge_pages = ULONG_MAX;
-	unsigned long max_nr_pages_to_node, nr_pages_to_node, nr_free_pages_to_node;
+	unsigned long max_nr_pages_to_node, nr_pages_to_node, nr_pages_from_node; 
+	long nr_free_pages_to_node;
 	int from_nid, to_nid;
 	enum migrate_mode mode = MIGRATE_SYNC |
 		(migrate_mt ? MIGRATE_MT : MIGRATE_SINGLETHREAD) |
@@ -273,18 +286,20 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 
 	max_nr_pages_to_node = memcg_max_size_node(memcg, to_nid);
 	nr_pages_to_node = memcg_size_node(memcg, to_nid);
-
-	VM_BUG_ON(max_nr_pages_to_node < nr_pages_to_node);
+	nr_pages_from_node = memcg_size_node(memcg, from_nid);
 
 	nr_free_pages_to_node = max_nr_pages_to_node - nr_pages_to_node;
 
 	pr_debug("%ld free pages at to node: %d\n", nr_free_pages_to_node, to_nid);
+	if (nr_free_pages_to_node < 0)
+		pr_info("%ld free pages at to node: %d\n", nr_free_pages_to_node, to_nid);
 
 	/* do not migrate in more pages than to node can hold */
 	nr_pages = min_t(unsigned long, max_nr_pages_to_node, nr_pages);
 
 	/* if to node has enough space, migrate all possible pages in from node */
 	if (nr_pages != ULONG_MAX &&
+		nr_free_pages_to_node > 0 &&
 		nr_pages < nr_free_pages_to_node)
 		from_action = ISOLATE_HOT_AND_COLD_PAGES;
 
@@ -296,7 +311,8 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	pr_debug("%ld pages isolated at from node: %d\n", nr_isolated_from_pages, from_nid);
 
 	if (max_nr_pages_to_node != ULONG_MAX &&
-		nr_free_pages_to_node < nr_isolated_from_pages) {
+		(nr_free_pages_to_node < 0 ||
+		 nr_free_pages_to_node < nr_isolated_from_pages)) {
 		LIST_HEAD(to_base_page_list);
 		LIST_HEAD(to_huge_page_list);
 
@@ -337,8 +353,8 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 
 	if (nr_isolated_to_base_pages != ULONG_MAX &&
 		nr_isolated_to_huge_pages != ULONG_MAX)
-		putback_overflow_pages(nr_free_pages_to_node/2 + nr_isolated_to_base_pages,
-				nr_free_pages_to_node/2 + nr_isolated_to_huge_pages,
+		putback_overflow_pages(nr_isolated_to_base_pages,
+				nr_isolated_to_huge_pages, nr_free_pages_to_node,
 				&from_base_page_list, &from_huge_page_list);
 
 	do {
