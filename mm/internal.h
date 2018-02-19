@@ -584,7 +584,7 @@ extern int copy_page_lists_mt(struct page **to,
 extern int exchange_page_mthread(struct page *to, struct page *from,
 			int nr_pages);
 extern int exchange_page_lists_mthread(struct page **to,
-						  struct page **from, 
+						  struct page **from,
 						  int nr_pages);
 
 extern int exchange_two_pages(struct page *page1, struct page *page2);
@@ -595,5 +595,7 @@ int writeout(struct address_space *mapping, struct page *page);
 
 int get_nodes(nodemask_t *nodes, const unsigned long __user *nmask,
 		     unsigned long maxnode);
+
+unsigned move_pages_to_lru(struct lruvec *lruvec, struct list_head *page_list);
 
 #endif	/* __MM_INTERNAL_H */
