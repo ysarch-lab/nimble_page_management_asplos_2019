@@ -558,4 +558,10 @@ int writeout(struct address_space *mapping, struct page *page);
 int get_nodes(nodemask_t *nodes, const unsigned long __user *nmask,
 		     unsigned long maxnode);
 
+unsigned move_active_pages_to_lru(struct lruvec *lruvec,
+				     struct list_head *list,
+				     struct list_head *pages_to_free,
+				     enum lru_list lru);
+void putback_inactive_pages(struct lruvec *lruvec, struct list_head *page_list);
+
 #endif	/* __MM_INTERNAL_H */

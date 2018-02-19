@@ -9,6 +9,7 @@
 #include <linux/migrate.h>
 #include <linux/mm_inline.h>
 #include <linux/nodemask.h>
+#include <linux/rmap.h>
 #include <linux/security.h>
 #include <linux/syscalls.h>
 
@@ -19,6 +20,13 @@ enum isolate_action {
 	ISOLATE_HOT_PAGES,
 	ISOLATE_HOT_AND_COLD_PAGES,
 };
+
+static inline unsigned long lruvec_size_memcg_node(enum lru_list lru,
+	struct mem_cgroup *memcg, int nid)
+{
+	VM_BUG_ON(lru < 0 || lru >= NR_LRU_LISTS);
+	return mem_cgroup_node_nr_lru_pages(memcg, nid, BIT(lru));
+}
 
 static inline unsigned long memcg_size_node(struct mem_cgroup *memcg, int nid)
 {
@@ -262,7 +270,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	 * from node  */
 	unsigned long nr_isolated_to_base_pages = ULONG_MAX,
 				  nr_isolated_to_huge_pages = ULONG_MAX;
-	unsigned long max_nr_pages_to_node, nr_pages_to_node, nr_pages_from_node; 
+	unsigned long max_nr_pages_to_node, nr_pages_to_node, nr_pages_from_node;
 	long nr_free_pages_to_node;
 	int from_nid, to_nid;
 	enum migrate_mode mode = MIGRATE_SYNC |
@@ -399,10 +407,215 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	return err;
 }
 
-static int shrink_lists(struct task_struct *p, struct mm_struct *mm)
+static unsigned long shrink_active_list(pg_data_t *pgdat, struct lruvec *lruvec,
+	enum lru_list lru, unsigned long nr_to_scan, bool fast_node)
+{
+	unsigned long nr_scanned = 0, nr_taken = 0, nr_rotated = 0;
+	unsigned long nr_activate, nr_deactivate;
+	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
+	unsigned long vm_flags;
+	struct page *page;
+	int file = is_file_lru(lru);
+	LIST_HEAD(l_hold);
+	LIST_HEAD(l_active);
+	LIST_HEAD(l_inactive);
+
+	lru_add_drain();
+
+	spin_lock_irq(&pgdat->lru_lock);
+
+	nr_taken = isolate_lru_pages(nr_to_scan, lruvec, &l_hold, &l_hold,
+				     &nr_scanned, &nr_taken, &nr_taken, 0, lru);
+
+	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
+
+	spin_unlock_irq(&pgdat->lru_lock);
+
+	while (!list_empty(&l_hold)) {
+		cond_resched();
+		page = lru_to_page(&l_hold);
+		list_del(&page->lru);
+
+		if (unlikely(!page_evictable(page))) {
+			putback_lru_page(page);
+			continue;
+		}
+
+		if (page_referenced(page, 0, memcg,
+				    &vm_flags)) {
+			nr_rotated += hpage_nr_pages(page);
+			/*
+			 * Identify referenced, file-backed active pages and
+			 * give them one more trip around the active list. So
+			 * that executable code get better chances to stay in
+			 * memory under moderate memory pressure.  Anon pages
+			 * are not likely to be evicted by use-once streaming
+			 * IO, plus JVM can create lots of anon VM_EXEC pages,
+			 * so we ignore them here.
+			 */
+			if ((vm_flags & VM_EXEC) && page_is_file_cache(page)) {
+				list_add(&page->lru, &l_active);
+				continue;
+			}
+		}
+
+		ClearPageActive(page);	/* we are de-activating */
+		list_add(&page->lru, &l_inactive);
+	}
+
+	/*
+	 * Move pages back to the lru list.
+	 */
+	spin_lock_irq(&pgdat->lru_lock);
+
+	nr_activate = move_active_pages_to_lru(lruvec, &l_active, &l_hold, lru);
+	nr_deactivate = move_active_pages_to_lru(lruvec, &l_inactive, &l_hold, lru - LRU_ACTIVE);
+	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, -nr_taken);
+	spin_unlock_irq(&pgdat->lru_lock);
+
+	mem_cgroup_uncharge_list(&l_hold);
+	free_hot_cold_page_list(&l_hold, true);
+
+	return 0;
+}
+
+static unsigned long shrink_inactive_page_list(struct list_head *page_list,
+	pg_data_t *pgdat, struct lruvec *lruvec, enum lru_list lru,
+	struct mem_cgroup *memcg, unsigned long nr_taken)
+{
+	unsigned long nr_activate, nr_deactivate;
+	int file = is_file_lru(lru);
+	LIST_HEAD(l_active);
+	LIST_HEAD(l_inactive);
+	LIST_HEAD(l_hold);
+
+	while (!list_empty(page_list)) {
+		struct page *page;
+		int referenced_ptes, referenced_page;
+		unsigned long vm_flags;
+
+		page = list_first_entry(page_list, struct page, lru);
+		list_del(&page->lru);
+
+		referenced_ptes = page_referenced(page, 0, memcg, &vm_flags);
+		referenced_page = TestClearPageReferenced(page);
+
+		if (referenced_ptes) {
+			SetPageReferenced(page);
+
+			if (referenced_page || referenced_ptes > 1) {
+				SetPageActive(page);
+				list_add(&page->lru, &l_active);
+				continue;
+			}
+
+			if (vm_flags & VM_EXEC) {
+				SetPageActive(page);
+				list_add(&page->lru, &l_active);
+				continue;
+			}
+		}
+		list_add(&page->lru, &l_inactive);
+	}
+	/*
+	 * Move pages back to the lru list.
+	 */
+	spin_lock_irq(&pgdat->lru_lock);
+
+	nr_activate = move_active_pages_to_lru(lruvec, &l_active, &l_hold, lru + LRU_ACTIVE);
+	nr_deactivate = move_active_pages_to_lru(lruvec, &l_inactive, &l_hold, lru);
+	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, -nr_taken);
+	spin_unlock_irq(&pgdat->lru_lock);
+
+	list_splice(&l_hold, page_list);
+
+	return 0;
+}
+
+static unsigned long shrink_inactive_list(pg_data_t *pgdat, struct lruvec *lruvec,
+	enum lru_list lru, unsigned long nr_to_scan, bool fast_node)
+{
+	unsigned long nr_scanned = 0, nr_taken = 0, nr_rotated;
+	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
+	int file = is_file_lru(lru);
+	LIST_HEAD(page_list);
+
+	lru_add_drain();
+
+	spin_lock_irq(&pgdat->lru_lock);
+
+	nr_taken = isolate_lru_pages(nr_to_scan, lruvec, &page_list, &page_list,
+			&nr_scanned, &nr_taken, &nr_taken, 0, lru);
+
+	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
+
+	spin_unlock_irq(&pgdat->lru_lock);
+
+	nr_rotated = shrink_inactive_page_list(&page_list, pgdat, lruvec, lru, memcg,
+			nr_taken);
+
+	mem_cgroup_uncharge_list(&page_list);
+	free_hot_cold_page_list(&page_list, true);
+	return 0;
+}
+
+static unsigned long shrink_lists_node_memcg(pg_data_t *pgdat,
+	struct mem_cgroup *memcg, unsigned long nr_to_scan,
+	bool fast_node)
+{
+	struct lruvec *lruvec = mem_cgroup_lruvec(pgdat, memcg);
+	unsigned long nr_rotated_active = 0, nr_rotated_inactive = 0;
+	enum lru_list lru;
+
+	for_each_evictable_lru(lru) {
+		unsigned long nr_to_scan_local = lruvec_size_memcg_node(lru, memcg,
+				pgdat->node_id) / 2;
+		/*nr_reclaimed += shrink_list(lru, nr_to_scan, lruvec, memcg, sc);*/
+		/*
+		 * for from(slow) node, we want active list, we start from the top of
+		 * the active list. For pages in the bottom of
+		 * the inactive list, we can place it to the top of inactive list
+		 */
+		/*
+		 * for to(fast) node, we want inactive list, we start from the bottom of
+		 * the inactive list. For pages in the active list, we just keep them.
+		 */
+		/*
+		 * A key question is how many pages to scan each time, and what criteria
+		 * to use to move pages between active/inactive page lists.
+		 *  */
+		if (is_active_lru(lru))
+			nr_rotated_active += shrink_active_list(pgdat, lruvec, lru,
+				nr_to_scan_local, fast_node);
+		else
+			nr_rotated_inactive += shrink_inactive_list(pgdat, lruvec, lru,
+				nr_to_scan_local, fast_node);
+	}
+	cond_resched();
+
+	return 0;
+}
+
+static int shrink_lists(struct task_struct *p, struct mm_struct *mm,
+		const nodemask_t *from, const nodemask_t *to, unsigned long nr_to_scan)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_task(p);
+	int from_nid, to_nid;
 	int err = 0;
+
+	VM_BUG_ON(!memcg);
+	/* Let's handle simplest situation first */
+	VM_BUG_ON(!(nodes_weight(*from) == 1 && nodes_weight(*to) == 1));
+
+	if (memcg == root_mem_cgroup)
+		return 0;
+
+	from_nid = first_node(*from);
+	to_nid = first_node(*to);
+
+	shrink_lists_node_memcg(NODE_DATA(from_nid), memcg, nr_to_scan, false);
+
+	shrink_lists_node_memcg(NODE_DATA(to_nid), memcg, nr_to_scan, true);
 
 	return err;
 }
@@ -488,7 +701,7 @@ SYSCALL_DEFINE6(mm_manage, pid_t, pid, unsigned long, nr_pages,
 	}
 
 	if (flags & MPOL_MF_SHRINK_LISTS)
-		shrink_lists(task, mm);
+		shrink_lists(task, mm, old, new, nr_pages);
 
 	if (flags & MPOL_MF_MOVE)
 		err = do_mm_manage(task, mm, old, new, nr_pages, flags);

@@ -1663,7 +1663,7 @@ static int too_many_isolated(struct pglist_data *pgdat, int file,
 	return isolated > inactive;
 }
 
-static noinline_for_stack void
+noinline_for_stack void
 putback_inactive_pages(struct lruvec *lruvec, struct list_head *page_list)
 {
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
@@ -1914,7 +1914,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
  * Returns the number of pages moved to the given lru.
  */
 
-static unsigned move_active_pages_to_lru(struct lruvec *lruvec,
+unsigned move_active_pages_to_lru(struct lruvec *lruvec,
 				     struct list_head *list,
 				     struct list_head *pages_to_free,
 				     enum lru_list lru)
