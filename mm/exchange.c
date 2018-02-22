@@ -9,6 +9,7 @@
 
 #include <linux/syscalls.h>
 #include <linux/migrate.h>
+#include <linux/exchange.h>
 #include <linux/security.h>
 #include <linux/cpuset.h>
 #include <linux/hugetlb.h>
@@ -35,19 +36,6 @@ struct pages_to_node {
 
 	unsigned long to_addr;
 	int to_status;
-};
-
-struct exchange_page_info {
-	struct page *from_page;
-	struct page *to_page;
-
-	struct anon_vma *from_anon_vma;
-	struct anon_vma *to_anon_vma;
-
-	int from_page_was_mapped;
-	int to_page_was_mapped;
-
-	struct list_head list;
 };
 
 struct page_flags {
@@ -867,7 +855,7 @@ static bool can_be_exchanged(struct page *from, struct page *to)
  * Caller should release the exchange_list resource.
  *
  * */
-static int exchange_pages(struct list_head *exchange_list,
+int exchange_pages(struct list_head *exchange_list,
 			enum migrate_mode mode,
 			int reason)
 {
@@ -1094,8 +1082,7 @@ static int unmap_pair_pages_concur(struct exchange_page_info *one_pair,
 			try_to_free_buffers(from_page);
 			goto out_unlock_both;
 		}
-	} else {
-		VM_BUG_ON_PAGE(!page_mapped(from_page), from_page);
+	} else if (page_mapped(from_page)) {
 		/* Establish migration ptes */
 		VM_BUG_ON_PAGE(PageAnon(from_page) && !PageKsm(from_page) &&
 					   !anon_vma_from_page, from_page);
@@ -1111,8 +1098,7 @@ static int unmap_pair_pages_concur(struct exchange_page_info *one_pair,
 			try_to_free_buffers(to_page);
 			goto out_unlock_both;
 		}
-	} else {
-		VM_BUG_ON_PAGE(!page_mapped(to_page), to_page);
+	} else if (page_mapped(to_page)) {
 		/* Establish migration ptes */
 		VM_BUG_ON_PAGE(PageAnon(to_page) && !PageKsm(to_page) &&
 					   !anon_vma_to_page, to_page);
@@ -1169,6 +1155,17 @@ static int exchange_page_mapping_concur(struct list_head *unmapped_list_ptr,
 							to_page, from_page, NULL, NULL, mode, 0, 0);
 
 		if (rc) {
+			remove_migration_ptes(from_page, from_page, false);
+			unlock_page(from_page);
+			remove_migration_ptes(to_page, to_page, false);
+			unlock_page(to_page);
+
+			putback_lru_page(from_page);
+			putback_lru_page(to_page);
+
+			one_pair->from_page = NULL;
+			one_pair->to_page = NULL;
+
 			list_move(&one_pair->list, exchange_list_ptr);
 			++nr_failed;
 		}
@@ -1185,6 +1182,9 @@ static int exchange_page_data_concur(struct list_head *unmapped_list_ptr,
 	struct page **src_page_list = NULL, **dst_page_list = NULL;
 	unsigned long size = 0;
 	int rc = -EFAULT;
+
+	if (list_empty(unmapped_list_ptr))
+		return 0;
 
 	/* form page list  */
 	list_for_each_entry(one_pair, unmapped_list_ptr, list) {
@@ -1264,7 +1264,7 @@ static int remove_migration_ptes_concur(struct list_head *unmapped_list_ptr)
 	return 0;
 }
 
-static int exchange_pages_concur(struct list_head *exchange_list,
+int exchange_pages_concur(struct list_head *exchange_list,
 		enum migrate_mode mode, int reason)
 {
 	struct exchange_page_info *one_pair, *one_pair2;
@@ -1276,7 +1276,7 @@ static int exchange_pages_concur(struct list_head *exchange_list,
 	LIST_HEAD(serialized_list);
 	LIST_HEAD(unmapped_list);
 
-	for(pass = 0; pass < 10 && retry; pass++) {
+	for(pass = 0; pass < 1 && retry; pass++) {
 		retry = 0;
 
 		/* unmap and get new page for page_mapping(page) == NULL */
