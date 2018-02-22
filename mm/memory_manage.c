@@ -7,6 +7,7 @@
 #include <linux/memcontrol.h>
 #include <linux/mempolicy.h>
 #include <linux/migrate.h>
+#include <linux/exchange.h>
 #include <linux/mm_inline.h>
 #include <linux/nodemask.h>
 #include <linux/rmap.h>
@@ -58,6 +59,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 	unsigned long nr_zone_taken[MAX_NR_ZONES] = { 0 };
 	unsigned long scan, total_scan, nr_pages;
 	LIST_HEAD(busy_list);
+	LIST_HEAD(odd_list);
 
 	scan = 0;
 	for (total_scan = 0;
@@ -85,9 +87,12 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			if (nr_pages == 1) {
 				list_move(&page->lru, dst_base_page);
 				*nr_taken_base_page += nr_pages;
-			} else {
+			} else if (nr_pages == HPAGE_PMD_NR){
 				list_move(&page->lru, dst_huge_page);
 				*nr_taken_huge_page += nr_pages;
+			} else {
+				list_move(&page->lru, &odd_list);
+				*nr_taken_base_page += nr_pages;
 			}
 			break;
 
@@ -102,6 +107,8 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 	}
 	if (!list_empty(&busy_list))
 		list_splice(&busy_list, src);
+
+	list_splice_tail(&odd_list, dst_huge_page);
 
 	*nr_scanned = total_scan;
 	update_lru_sizes(lruvec, lru, nr_zone_taken);
@@ -251,6 +258,53 @@ static int putback_overflow_pages(unsigned long max_nr_base_pages,
 	return _putback_overflow_pages(nr_free_pages/2 + max_nr_huge_pages, huge_page_list);
 }
 
+static int add_pages_to_exchange_list(struct list_head *from_pagelist,
+	struct list_head *to_pagelist, struct exchange_page_info *info_list,
+	struct list_head *exchange_list, unsigned long info_list_size)
+{
+	unsigned long info_list_index = 0;
+	LIST_HEAD(odd_from_list);
+	LIST_HEAD(odd_to_list);
+
+	while (!list_empty(from_pagelist) && !list_empty(to_pagelist)) {
+		struct page *from_page, *to_page;
+		struct exchange_page_info *one_pair = &info_list[info_list_index];
+
+		from_page = list_first_entry_or_null(from_pagelist, struct page, lru);
+		to_page = list_first_entry_or_null(to_pagelist, struct page, lru);
+
+		if (!from_page || !to_page)
+			break;
+		if (hpage_nr_pages(from_page) != hpage_nr_pages(to_page)) {
+			pr_info("from: %d, to: %d\n", hpage_nr_pages(from_page), hpage_nr_pages(to_page));
+			if (!(hpage_nr_pages(from_page) == 1 && hpage_nr_pages(from_page) == HPAGE_PMD_NR)) {
+				list_del(&from_page->lru);
+				list_add(&from_page->lru, &odd_from_list);
+			}
+			if (!(hpage_nr_pages(to_page) == 1 && hpage_nr_pages(to_page) == HPAGE_PMD_NR)) {
+				list_del(&to_page->lru);
+				list_add(&to_page->lru, &odd_to_list);
+			}
+			continue;
+		}
+
+		list_del(&from_page->lru);
+		list_del(&to_page->lru);
+
+		one_pair->from_page = from_page;
+		one_pair->to_page = to_page;
+
+		list_add_tail(&one_pair->list, exchange_list);
+
+		info_list_index++;
+		VM_BUG_ON(info_list_index > info_list_size);
+	}
+	list_splice(&odd_from_list, from_pagelist);
+	list_splice(&odd_to_list, to_pagelist);
+
+	return info_list_index;
+}
+
 static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 		const nodemask_t *from, const nodemask_t *to,
 		unsigned long nr_pages, int flags)
@@ -259,7 +313,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	bool migrate_concur = flags & MPOL_MF_MOVE_CONCUR;
 	bool migrate_dma = flags & MPOL_MF_MOVE_DMA;
 	bool move_hot_and_cold_pages = flags & MPOL_MF_MOVE_ALL;
-	/*bool exchange_pages = flags & MPOL_MF_EXCHANGE;*/
+	bool migrate_exchange_pages = flags & MPOL_MF_EXCHANGE;
 	/*bool migrate_pages_out = false;*/
 	struct mem_cgroup *memcg = mem_cgroup_from_task(p);
 	int err = 0;
@@ -334,29 +388,69 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 				&nr_isolated_to_base_pages, &nr_isolated_to_huge_pages,
 				move_hot_and_cold_pages?ISOLATE_HOT_AND_COLD_PAGES:ISOLATE_COLD_PAGES);
 		pr_debug("%lu pages isolated at to node: %d\n", nr_isolated_to_pages, to_nid);
-		if (migrate_mt || migrate_concur) {
-			nr_isolated_to_base_pages -=
-				migrate_to_node(&to_base_page_list, from_nid, mode & ~MIGRATE_MT);
-			nr_isolated_to_huge_pages -=
-				migrate_to_node(&to_huge_page_list, from_nid, mode);
-		} else {
-			nr_isolated_to_base_pages -=
-				migrate_to_node(&to_base_page_list, from_nid, mode);
-			nr_isolated_to_huge_pages -=
-				migrate_to_node(&to_huge_page_list, from_nid, mode);
-#if 0
-			/* migrate base pages and THPs together if no opt is used */
-			if (!list_empty(&to_huge_page_list)) {
-				list_splice(&to_base_page_list, &to_huge_page_list);
-				migrate_to_node(&to_huge_page_list, from_nid, mode);
-			} else
-				migrate_to_node(&to_base_page_list, from_nid, mode);
-#endif
-		}
 
-		p->page_migration_stats.f2s.nr_migrations += 1;
-		p->page_migration_stats.f2s.nr_base_pages += nr_isolated_to_base_pages;
-		p->page_migration_stats.f2s.nr_huge_pages += nr_isolated_to_huge_pages;
+		if (migrate_exchange_pages) {
+			struct exchange_page_info *info_list;
+			unsigned long info_list_base_page_size = 0;
+			/*min_t(unsigned long,*/
+				/*nr_isolated_from_base_pages, nr_isolated_to_base_pages);*/
+			unsigned long info_list_huge_page_size = min_t(unsigned long,
+				nr_isolated_from_huge_pages, nr_isolated_to_huge_pages) /
+				HPAGE_PMD_NR;
+			unsigned long info_list_size = info_list_huge_page_size;
+			unsigned long added_size = 0;
+			LIST_HEAD(exchange_list);
+			
+			info_list = kzalloc(sizeof(struct exchange_page_info)*info_list_size,
+					GFP_KERNEL);
+
+			/*added_size += add_pages_to_exchange_list(&from_base_page_list, &to_base_page_list,*/
+				/*info_list, &exchange_list, info_list_base_page_size);*/
+			added_size += add_pages_to_exchange_list(&from_huge_page_list, &to_huge_page_list,
+				&info_list[added_size], &exchange_list, info_list_huge_page_size);
+
+			VM_BUG_ON(added_size > info_list_size);
+
+			if (migrate_concur)
+				exchange_pages_concur(&exchange_list, mode, MR_SYSCALL);
+			else
+				exchange_pages(&exchange_list, mode, MR_SYSCALL);
+
+			kfree(info_list);
+
+			nr_isolated_to_base_pages -= info_list_base_page_size;
+			nr_isolated_to_huge_pages -= info_list_huge_page_size * HPAGE_PMD_NR;
+
+			p->page_migration_stats.nr_exchanges += 1;
+			p->page_migration_stats.nr_exchange_base_pages += info_list_base_page_size;
+			p->page_migration_stats.nr_exchange_huge_pages += info_list_huge_page_size * HPAGE_PMD_NR;
+
+			goto migrate_out;
+		} else {
+migrate_out:
+			if (migrate_mt || migrate_concur) {
+				nr_isolated_to_base_pages -=
+					migrate_to_node(&to_base_page_list, from_nid, mode & ~MIGRATE_MT);
+				nr_isolated_to_huge_pages -=
+					migrate_to_node(&to_huge_page_list, from_nid, mode);
+			} else {
+				nr_isolated_to_base_pages -=
+					migrate_to_node(&to_base_page_list, from_nid, mode);
+				nr_isolated_to_huge_pages -=
+					migrate_to_node(&to_huge_page_list, from_nid, mode);
+#if 0
+				/* migrate base pages and THPs together if no opt is used */
+				if (!list_empty(&to_huge_page_list)) {
+					list_splice(&to_base_page_list, &to_huge_page_list);
+					migrate_to_node(&to_huge_page_list, from_nid, mode);
+				} else
+					migrate_to_node(&to_base_page_list, from_nid, mode);
+#endif
+			}
+			p->page_migration_stats.f2s.nr_migrations += 1;
+			p->page_migration_stats.f2s.nr_base_pages += nr_isolated_to_base_pages;
+			p->page_migration_stats.f2s.nr_huge_pages += nr_isolated_to_huge_pages;
+		}
 	}
 
 	if (nr_isolated_to_base_pages != ULONG_MAX &&

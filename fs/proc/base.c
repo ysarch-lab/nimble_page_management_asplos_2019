@@ -308,6 +308,9 @@ static int proc_pid_page_migration_stats(struct seq_file *m, struct pid_namespac
 #define SHOW_PAGE_MIGRATION_STATS(var) \
 		jiffies_to_msecs(var.base_page_under_migration_jiffies), \
 		jiffies_to_msecs(var.huge_page_under_migration_jiffies), \
+		var.nr_exchanges, \
+		var.nr_exchange_base_pages, \
+		var.nr_exchange_huge_pages, \
 		SHOW_PAGE_MIGRATION_COUNTERS(var.f2s), \
 		SHOW_PAGE_MIGRATION_COUNTERS(var.s2f)
 
@@ -315,6 +318,9 @@ static int proc_pid_page_migration_stats(struct seq_file *m, struct pid_namespac
 	seq_printf(m,
 		"WaitBasePageMigration_ms %u\n"
 		"WaitHugePageMigration_ms %u\n"
+		"ExchangePages_nr_exchanges %lu\n"
+		"ExchangePagesBase_nr_base_pages %lu\n"
+		"ExchangePagesHuge_nr_base_pages %lu\n"
 		"Fast2Slow_nr_migrations %lu\n"
 		"Fast2SlowBasePageMigrations_nr_base_pages %lu\n"
 		"Fast2SlowHugePageMigrations_nr_base_pages %lu\n"
@@ -345,6 +351,9 @@ static int proc_pid_child_stats(struct seq_file *m, struct pid_namespace *ns,
 		seq_printf(m,
 			"WaitBasePageMigration_ms %u\n"
 			"WaitHugePageMigration_ms %u\n"
+			"ExchangePages_nr_exchanges %lu\n"
+			"ExchangePagesBase_nr_base_pages %lu\n"
+			"ExchangePagesHuge_nr_base_pages %lu\n"
 			"Fast2Slow_nr_migrations %lu\n"
 			"Fast2SlowBasePageMigrations_nr_base_pages %lu\n"
 			"Fast2SlowHugePageMigrations_nr_base_pages %lu\n"

@@ -88,6 +88,9 @@ struct page_migration_counters {
 struct page_migration_stats {
 	unsigned long base_page_under_migration_jiffies;
 	unsigned long huge_page_under_migration_jiffies;
+	unsigned long nr_exchanges;
+	unsigned long nr_exchange_base_pages;
+	unsigned long nr_exchange_huge_pages;
 	struct page_migration_counters f2s; /* fast to slow */
 	struct page_migration_counters s2f; /* slow to fast */
 };

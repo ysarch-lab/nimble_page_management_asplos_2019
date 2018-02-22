@@ -164,6 +164,9 @@ static void __exit_signal(struct task_struct *tsk)
 		do {\
 			dst.base_page_under_migration_jiffies += src.base_page_under_migration_jiffies;\
 			dst.huge_page_under_migration_jiffies += src.huge_page_under_migration_jiffies;\
+			dst.nr_exchanges += src.nr_exchanges;\
+			dst.nr_exchange_base_pages += src.nr_exchange_base_pages;\
+			dst.nr_exchange_huge_pages += src.nr_exchange_huge_pages;\
 			ADD_PAGE_MIGRATION_COUNTERS(dst.f2s, src.f2s);\
 			ADD_PAGE_MIGRATION_COUNTERS(dst.s2f, src.s2f);\
 		} while (0);
