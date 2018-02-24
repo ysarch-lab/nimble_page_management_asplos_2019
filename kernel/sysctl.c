@@ -102,6 +102,7 @@ extern unsigned int limit_mt_num;
 extern int use_all_dma_chans;
 extern int limit_dma_chans;
 extern int sysctl_enable_thp_migration;
+extern int migration_batch_size;
 
 /* External variables not in a header file. */
 extern int suid_dumpable;
@@ -1430,6 +1431,14 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= proc_dointvec,
 		.extra1		= &zero,
 		.extra2		= &one,
+	 },
+	 {
+		.procname	= "migration_batch_size",
+		.data		= &migration_batch_size,
+		.maxlen		= sizeof(migration_batch_size),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+		.extra1		= &one,
 	 },
 	 {
 		.procname	= "hugetlb_shm_group",
