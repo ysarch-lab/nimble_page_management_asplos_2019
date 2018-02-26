@@ -1438,7 +1438,6 @@ static struct ctl_table vm_table[] = {
 		.maxlen		= sizeof(migration_batch_size),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
-		.extra1		= &one,
 	 },
 	 {
 		.procname	= "hugetlb_shm_group",
