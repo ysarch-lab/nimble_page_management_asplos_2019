@@ -168,6 +168,7 @@ static int migrate_to_node(struct list_head *page_list, int nid,
 		enum migrate_mode mode, int batch_size)
 {
 	bool migrate_concur = mode & MIGRATE_CONCUR;
+	bool unlimited_batch_size = (batch_size <=0 || !migrate_concur);
 	int num = 0;
 	int from_nid = -1;
 	int err;
@@ -180,7 +181,7 @@ static int migrate_to_node(struct list_head *page_list, int nid,
 		int i;
 
 		/* it should move all pages to batch_page_list if !migrate_concur */
-		for (i = 0; i < batch_size || !migrate_concur; i++) {
+		for (i = 0; i < batch_size || unlimited_batch_size; i++) {
 			struct page *item = list_first_entry_or_null(page_list, struct page, lru);
 			if (!item)
 				break;
@@ -334,7 +335,7 @@ static unsigned long exchange_pages_between_nodes(unsigned long nr_from_pages,
 	LIST_HEAD(exchange_list);
 
 	/* non concurrent does not need to split into batches  */
-	if (!migrate_concur)
+	if (!migrate_concur || batch_size <= 0)
 		batch_size = info_list_size;
 
 	info_list = kzalloc(sizeof(struct exchange_page_info)*batch_size,
