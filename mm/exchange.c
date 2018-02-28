@@ -1156,11 +1156,22 @@ static int exchange_page_mapping_concur(struct list_head *unmapped_list_ptr,
 
 		if (rc) {
 			remove_migration_ptes(from_page, from_page, false);
-			unlock_page(from_page);
 			remove_migration_ptes(to_page, to_page, false);
+
+			if (one_pair->from_anon_vma)
+				put_anon_vma(one_pair->from_anon_vma);
+			unlock_page(from_page);
+
+			if (one_pair->to_anon_vma)
+				put_anon_vma(one_pair->to_anon_vma);
 			unlock_page(to_page);
 
+			mod_node_page_state(page_pgdat(from_page), NR_ISOLATED_ANON +
+					page_is_file_cache(from_page), -hpage_nr_pages(from_page));
 			putback_lru_page(from_page);
+
+			mod_node_page_state(page_pgdat(to_page), NR_ISOLATED_ANON +
+					page_is_file_cache(to_page), -hpage_nr_pages(to_page));
 			putback_lru_page(to_page);
 
 			one_pair->from_page = NULL;
@@ -1281,8 +1292,50 @@ int exchange_pages_concur(struct list_head *exchange_list,
 
 		/* unmap and get new page for page_mapping(page) == NULL */
 		list_for_each_entry_safe(one_pair, one_pair2, exchange_list, list) {
+			struct page *from_page = one_pair->from_page;
+			struct page *to_page = one_pair->to_page;
 			cond_resched();
 
+			if (page_count(from_page) == 1) {
+				/* page was freed from under us. So we are done  */
+				ClearPageActive(from_page);
+				ClearPageUnevictable(from_page);
+
+				put_page(from_page);
+				dec_node_page_state(from_page, NR_ISOLATED_ANON +
+						page_is_file_cache(from_page));
+
+				if (page_count(to_page) == 1) {
+					ClearPageActive(to_page);
+					ClearPageUnevictable(to_page);
+					put_page(to_page);
+				} else {
+					mod_node_page_state(page_pgdat(to_page), NR_ISOLATED_ANON +
+							page_is_file_cache(to_page), -hpage_nr_pages(to_page));
+					putback_lru_page(to_page);
+				}
+				list_del(&one_pair->list);
+
+				continue;
+			}
+
+			if (page_count(to_page) == 1) {
+				/* page was freed from under us. So we are done  */
+				ClearPageActive(to_page);
+				ClearPageUnevictable(to_page);
+
+				put_page(to_page);
+
+				dec_node_page_state(to_page, NR_ISOLATED_ANON +
+						page_is_file_cache(to_page));
+
+				mod_node_page_state(page_pgdat(from_page), NR_ISOLATED_ANON +
+						page_is_file_cache(from_page), -hpage_nr_pages(from_page));
+				putback_lru_page(from_page);
+
+				list_del(&one_pair->list);
+				continue;
+			}
 		/* We do not exchange huge pages and file-backed pages concurrently */
 			if (PageHuge(one_pair->from_page) || PageHuge(one_pair->to_page)) {
 				rc = -ENODEV;
@@ -1292,9 +1345,7 @@ int exchange_pages_concur(struct list_head *exchange_list,
 				rc = -ENODEV;
 			}
 			else
-				rc = unmap_pair_pages_concur(one_pair,
-											pass > 2,
-											mode);
+				rc = unmap_pair_pages_concur(one_pair, 1, mode);
 
 			switch(rc) {
 			case -ENODEV:
