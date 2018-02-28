@@ -1009,6 +1009,8 @@ static int unmap_pair_pages_concur(struct exchange_page_info *one_pair,
 	struct page *from_page = one_pair->from_page;
 	struct page *to_page = one_pair->to_page;
 
+	one_pair->from_index = from_page->index;
+	one_pair->to_index = to_page->index;
 	/* from_page lock down  */
 	if (!trylock_page(from_page)) {
 		if (!force || ((mode & MIGRATE_MODE_MASK) == MIGRATE_ASYNC))
@@ -1128,7 +1130,6 @@ static int exchange_page_mapping_concur(struct list_head *unmapped_list_ptr,
 					   struct list_head *exchange_list_ptr,
 						enum migrate_mode mode)
 {
-	int rc = -EBUSY;
 	int nr_failed = 0;
 	struct address_space *to_page_mapping, *from_page_mapping;
 	struct exchange_page_info *one_pair, *one_pair2;
@@ -1136,6 +1137,7 @@ static int exchange_page_mapping_concur(struct list_head *unmapped_list_ptr,
 	list_for_each_entry_safe(one_pair, one_pair2, unmapped_list_ptr, list) {
 		struct page *from_page = one_pair->from_page;
 		struct page *to_page = one_pair->to_page;
+		int rc = -EBUSY;
 
 		VM_BUG_ON_PAGE(!PageLocked(from_page), from_page);
 		VM_BUG_ON_PAGE(!PageLocked(to_page), to_page);
@@ -1151,8 +1153,9 @@ static int exchange_page_mapping_concur(struct list_head *unmapped_list_ptr,
 		BUG_ON(PageWriteback(to_page));
 
 		/* actual page mapping exchange */
-		rc = exchange_page_move_mapping(to_page_mapping, from_page_mapping,
-							to_page, from_page, NULL, NULL, mode, 0, 0);
+		if (!page_mapped(from_page) && !page_mapped(to_page))
+			rc = exchange_page_move_mapping(to_page_mapping, from_page_mapping,
+								to_page, from_page, NULL, NULL, mode, 0, 0);
 
 		if (rc) {
 			if (one_pair->from_page_was_mapped)
@@ -1179,7 +1182,7 @@ static int exchange_page_mapping_concur(struct list_head *unmapped_list_ptr,
 			one_pair->from_page = NULL;
 			one_pair->to_page = NULL;
 
-			list_move(&one_pair->list, exchange_list_ptr);
+			list_del(&one_pair->list);
 			++nr_failed;
 		}
 	}
@@ -1251,10 +1254,19 @@ static int remove_migration_ptes_concur(struct list_head *unmapped_list_ptr)
 	struct exchange_page_info *iterator;
 
 	list_for_each_entry(iterator, unmapped_list_ptr, list) {
+		struct page *from_page = iterator->from_page;
+		struct page *to_page = iterator->to_page;
+
+		swap(from_page->index, iterator->from_index);
 		if (iterator->from_page_was_mapped)
 			remove_migration_ptes(iterator->from_page, iterator->to_page, false);
+		swap(from_page->index, iterator->from_index);
+
+		swap(to_page->index, iterator->to_index);
 		if (iterator->to_page_was_mapped)
 			remove_migration_ptes(iterator->to_page, iterator->from_page, false);
+		swap(to_page->index, iterator->to_index);
+
 
 #ifdef CONFIG_PAGE_MIGRATION_PROFILE
 		timestamp = rdtsc();

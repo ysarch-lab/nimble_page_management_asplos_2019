@@ -14,6 +14,8 @@ struct exchange_page_info {
 	int from_page_was_mapped;
 	int to_page_was_mapped;
 
+	pgoff_t from_index, to_index;
+
 	struct list_head list;
 };
 
