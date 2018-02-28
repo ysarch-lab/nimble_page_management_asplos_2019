@@ -1155,8 +1155,10 @@ static int exchange_page_mapping_concur(struct list_head *unmapped_list_ptr,
 							to_page, from_page, NULL, NULL, mode, 0, 0);
 
 		if (rc) {
-			remove_migration_ptes(from_page, from_page, false);
-			remove_migration_ptes(to_page, to_page, false);
+			if (one_pair->from_page_was_mapped)
+				remove_migration_ptes(from_page, from_page, false);
+			if (one_pair->to_page_was_mapped)
+				remove_migration_ptes(to_page, to_page, false);
 
 			if (one_pair->from_anon_vma)
 				put_anon_vma(one_pair->from_anon_vma);
@@ -1254,15 +1256,21 @@ static int remove_migration_ptes_concur(struct list_head *unmapped_list_ptr)
 		if (iterator->to_page_was_mapped)
 			remove_migration_ptes(iterator->to_page, iterator->from_page, false);
 
-		unlock_page(iterator->from_page);
+#ifdef CONFIG_PAGE_MIGRATION_PROFILE
+		timestamp = rdtsc();
+		current->move_pages_breakdown.remove_migration_ptes_cycles += timestamp -
+			current->move_pages_breakdown.last_timestamp;
+		current->move_pages_breakdown.last_timestamp = timestamp;
+#endif
 
 		if (iterator->from_anon_vma)
 			put_anon_vma(iterator->from_anon_vma);
+		unlock_page(iterator->from_page);
 
-		unlock_page(iterator->to_page);
 
 		if (iterator->to_anon_vma)
 			put_anon_vma(iterator->to_anon_vma);
+		unlock_page(iterator->to_page);
 
 
 		putback_lru_page(iterator->from_page);
@@ -1389,29 +1397,7 @@ int exchange_pages_concur(struct list_head *exchange_list,
 	nr_failed += retry;
 	rc = nr_failed;
 
-	list_for_each_entry_safe(one_pair, one_pair2, &serialized_list, list) {
-		struct page *from_page = one_pair->from_page;
-		struct page *to_page = one_pair->to_page;
-		int rc;
-
-		if ((page_mapping(from_page) != NULL) ||
-			(page_mapping(to_page) != NULL)) {
-			++nr_failed;
-			goto putback;
-		}
-
-		
-		rc = unmap_and_exchange(from_page, to_page, mode);
-
-		if (rc != MIGRATEPAGE_SUCCESS)
-			++nr_failed;
-
-putback:
-
-		putback_lru_page(from_page);
-		putback_lru_page(to_page);
-
-	}
+	exchange_pages(&serialized_list, mode, reason);
 out:
 	list_splice(&unmapped_list, exchange_list);
 	list_splice(&serialized_list, exchange_list);
