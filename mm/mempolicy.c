@@ -1968,6 +1968,24 @@ alloc_pages_vma(gfp_t gfp, int order, struct vm_area_struct *vma,
 		goto out;
 	}
 
+	if (pol->mode == MPOL_PREFERRED && (pol->flags & MPOL_F_MEMCG)) {
+		struct task_struct *p = current;
+		struct mem_cgroup *memcg = mem_cgroup_from_task(p);
+		int nid = pol->v.preferred_node;
+		unsigned long nr_memcg_node_size = memcg_max_size_node(memcg, nid);
+
+		while (nr_memcg_node_size != ULONG_MAX &&
+			   nr_memcg_node_size <= memcg_size_node(memcg, nid)) {
+			if ((nid = next_memory_node(nid)) == MAX_NUMNODES)
+				nid = first_memory_node;
+			nr_memcg_node_size = memcg_max_size_node(memcg, nid);
+		}
+
+		mpol_cond_put(pol);
+		page = __alloc_pages_node(nid, gfp | __GFP_THISNODE, order);
+		goto out;
+	}
+
 	if (unlikely(IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) && hugepage)) {
 		int hpage_node = node;
 
