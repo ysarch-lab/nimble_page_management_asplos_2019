@@ -24,43 +24,6 @@ enum isolate_action {
 	ISOLATE_HOT_AND_COLD_PAGES,
 };
 
-static inline unsigned long lruvec_size_memcg_node(enum lru_list lru,
-	struct mem_cgroup *memcg, int nid)
-{
-	VM_BUG_ON(lru < 0 || lru >= NR_LRU_LISTS);
-	return mem_cgroup_node_nr_lru_pages(memcg, nid, BIT(lru));
-}
-
-static inline unsigned long active_inactive_size_memcg_node(struct mem_cgroup *memcg, int nid, bool active)
-{
-	unsigned long val = 0;
-	enum lru_list lru;
-
-	for_each_evictable_lru(lru) {
-		if ((active  && is_active_lru(lru)) ||
-			(!active && !is_active_lru(lru)))
-			val += mem_cgroup_node_nr_lru_pages(memcg, nid, BIT(lru));
-	}
-
-	return val;
-}
-
-static inline unsigned long memcg_size_node(struct mem_cgroup *memcg, int nid)
-{
-	unsigned long val = 0;
-	int i;
-
-	for (i = 0; i < NR_LRU_LISTS; i++)
-		val += mem_cgroup_node_nr_lru_pages(memcg, nid, BIT(i));
-
-	return val;
-}
-
-static inline unsigned long memcg_max_size_node(struct mem_cgroup *memcg, int nid)
-{
-	return memcg->nodeinfo[nid]->max_nr_base_pages;
-}
-
 static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		struct lruvec *lruvec,
 		struct list_head *dst_base_page,
