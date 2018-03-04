@@ -31,6 +31,20 @@ static inline unsigned long lruvec_size_memcg_node(enum lru_list lru,
 	return mem_cgroup_node_nr_lru_pages(memcg, nid, BIT(lru));
 }
 
+static inline unsigned long active_inactive_size_memcg_node(struct mem_cgroup *memcg, int nid, bool active)
+{
+	unsigned long val = 0;
+	enum lru_list lru;
+
+	for_each_evictable_lru(lru) {
+		if ((active  && is_active_lru(lru)) ||
+			(!active && !is_active_lru(lru)))
+			val += mem_cgroup_node_nr_lru_pages(memcg, nid, BIT(lru));
+	}
+
+	return val;
+}
+
 static inline unsigned long memcg_size_node(struct mem_cgroup *memcg, int nid)
 {
 	unsigned long val = 0;
@@ -129,7 +143,7 @@ static unsigned long isolate_pages_from_lru_list(pg_data_t *pgdat,
 	enum lru_list lru;
 	unsigned long nr_all_taken = 0;
 
-	lru_add_drain_all();
+	pr_debug("isolate %lu pages directly from lru lists\n", nr_pages);
 
 	if (nr_pages == ULONG_MAX)
 		nr_pages = memcg_size_node(memcg, pgdat->node_id);
@@ -383,7 +397,8 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	 * from node  */
 	unsigned long nr_isolated_to_base_pages = ULONG_MAX,
 				  nr_isolated_to_huge_pages = ULONG_MAX;
-	unsigned long max_nr_pages_to_node, nr_pages_to_node, nr_pages_from_node;
+	unsigned long max_nr_pages_to_node, nr_pages_to_node, nr_active_pages_from_node;
+	unsigned long nr_pages_from_node;
 	long nr_free_pages_to_node;
 	int from_nid, to_nid;
 	enum migrate_mode mode = MIGRATE_SYNC |
@@ -405,8 +420,12 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	from_nid = first_node(*from);
 	to_nid = first_node(*to);
 
+	lru_add_drain_all();
+
 	max_nr_pages_to_node = memcg_max_size_node(memcg, to_nid);
 	nr_pages_to_node = memcg_size_node(memcg, to_nid);
+	nr_active_pages_from_node = active_inactive_size_memcg_node(memcg,
+			from_nid, true);
 	nr_pages_from_node = memcg_size_node(memcg, from_nid);
 
 	nr_free_pages_to_node = max_nr_pages_to_node - nr_pages_to_node;
@@ -417,12 +436,17 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 
 	/* do not migrate in more pages than to node can hold */
 	nr_pages = min_t(unsigned long, max_nr_pages_to_node, nr_pages);
+	/* do not migrate in more pages than from node has */
+	nr_pages = min_t(unsigned long, nr_pages_from_node, nr_pages);
 
+	pr_debug("nr_active_pages_from_node: %lu, nr_free_pages_to_node: %ld\n", nr_active_pages_from_node, nr_free_pages_to_node);
 	/* if to node has enough space, migrate all possible pages in from node */
 	if (nr_pages != ULONG_MAX &&
 		nr_free_pages_to_node > 0 &&
-		nr_pages < nr_free_pages_to_node)
+		nr_active_pages_from_node < nr_free_pages_to_node) {
 		from_action = ISOLATE_HOT_AND_COLD_PAGES;
+		pr_debug("from node isolate %lu hot and cold pages\n", nr_pages);
+	}
 
 	nr_isolated_from_pages = isolate_pages_from_lru_list(NODE_DATA(from_nid),
 			memcg, nr_pages, &from_base_page_list, &from_huge_page_list,
