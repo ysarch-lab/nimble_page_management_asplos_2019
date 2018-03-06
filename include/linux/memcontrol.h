@@ -668,6 +668,9 @@ void mem_cgroup_split_huge_fixup(struct page *head);
 static inline unsigned long lruvec_size_memcg_node(enum lru_list lru,
 	struct mem_cgroup *memcg, int nid)
 {
+	if (nid == MAX_NUMNODES)
+		return 0;
+
 	VM_BUG_ON(lru < 0 || lru >= NR_LRU_LISTS);
 	return mem_cgroup_node_nr_lru_pages(memcg, nid, BIT(lru));
 }
@@ -691,6 +694,9 @@ static inline unsigned long memcg_size_node(struct mem_cgroup *memcg, int nid)
 	unsigned long val = 0;
 	int i;
 
+	if (nid == MAX_NUMNODES)
+		return val;
+
 	for (i = 0; i < NR_LRU_LISTS; i++)
 		val += mem_cgroup_node_nr_lru_pages(memcg, nid, BIT(i));
 
@@ -699,6 +705,8 @@ static inline unsigned long memcg_size_node(struct mem_cgroup *memcg, int nid)
 
 static inline unsigned long memcg_max_size_node(struct mem_cgroup *memcg, int nid)
 {
+	if (nid == MAX_NUMNODES)
+		return 0;
 	return memcg->nodeinfo[nid]->max_nr_base_pages;
 }
 

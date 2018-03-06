@@ -394,8 +394,6 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 	nr_free_pages_to_node = max_nr_pages_to_node - nr_pages_to_node;
 
 	pr_debug("%ld free pages at to node: %d\n", nr_free_pages_to_node, to_nid);
-	if (nr_free_pages_to_node < 0)
-		pr_info("%ld free pages at to node: %d\n", nr_free_pages_to_node, to_nid);
 
 	/* do not migrate in more pages than to node can hold */
 	nr_pages = min_t(unsigned long, max_nr_pages_to_node, nr_pages);
@@ -502,6 +500,10 @@ migrate_out:
 			printk(KERN_DEBUG "%lu pages to be migrated to node: %d\n", nr_pages, to_nid);
 		}
 	} while (0);
+
+	if (nr_free_pages_to_node < 0 && !(list_empty(&from_base_page_list) &&
+		list_empty(&from_huge_page_list)))
+		pr_info("%ld free pages at to node: %d\n", nr_free_pages_to_node, to_nid);
 
 	if (migrate_mt || migrate_concur) {
 		nr_isolated_from_base_pages -=
@@ -826,6 +828,12 @@ SYSCALL_DEFINE6(mm_manage, pid_t, pid, unsigned long, nr_pages,
 		err = -EINVAL;
 		goto out;
 	}
+	if (test_bit(MMF_MM_MANAGE, &mm->flags)) {
+		mmput(mm);
+		goto out;
+	} else {
+		set_bit(MMF_MM_MANAGE, &mm->flags);
+	}
 
 	if (flags & MPOL_MF_SHRINK_LISTS)
 		shrink_lists(task, mm, old, new, nr_pages);
@@ -833,6 +841,7 @@ SYSCALL_DEFINE6(mm_manage, pid_t, pid, unsigned long, nr_pages,
 	if (flags & MPOL_MF_MOVE)
 		err = do_mm_manage(task, mm, old, new, nr_pages, flags);
 
+	clear_bit(MMF_MM_MANAGE, &mm->flags);
 	mmput(mm);
 out:
 	NODEMASK_SCRATCH_FREE(scratch);
