@@ -189,7 +189,7 @@ static int migrate_to_node(struct list_head *page_list, int nid,
 }
 
 static inline int _putback_overflow_pages(unsigned long max_nr_pages,
-		struct list_head *page_list)
+		struct list_head *page_list, unsigned long *nr_remaining_pages)
 {
 	struct page *page;
 	LIST_HEAD(putback_list);
@@ -197,6 +197,7 @@ static inline int _putback_overflow_pages(unsigned long max_nr_pages,
 	if (list_empty(page_list))
 		return max_nr_pages;
 
+	*nr_remaining_pages = 0;
 	/* in case we need to drop the whole list */
 	page = list_first_entry(page_list, struct page, lru);
 	if (max_nr_pages <= (2 * hpage_nr_pages(page))) {
@@ -213,6 +214,7 @@ static inline int _putback_overflow_pages(unsigned long max_nr_pages,
 			break;
 		}
 		max_nr_pages -= nr_pages;
+		*nr_remaining_pages += nr_pages;
 	}
 
 	/* we did not scan all pages in page_list, we need to put back some */
@@ -229,7 +231,9 @@ static int putback_overflow_pages(unsigned long max_nr_base_pages,
 		unsigned long max_nr_huge_pages,
 		long nr_free_pages,
 		struct list_head *base_page_list,
-		struct list_head *huge_page_list)
+		struct list_head *huge_page_list,
+		unsigned long *nr_base_pages,
+		unsigned long *nr_huge_pages)
 {
 	if (nr_free_pages < 0) {
 		if ((-nr_free_pages) > max_nr_base_pages) {
@@ -247,8 +251,9 @@ static int putback_overflow_pages(unsigned long max_nr_base_pages,
 	 * when max_nr_* go to zero, drop the remaining pages
 	 */
 	max_nr_huge_pages += _putback_overflow_pages(nr_free_pages/2 + max_nr_base_pages,
-			base_page_list);
-	return _putback_overflow_pages(nr_free_pages/2 + max_nr_huge_pages, huge_page_list);
+			base_page_list, nr_base_pages);
+	return _putback_overflow_pages(nr_free_pages/2 + max_nr_huge_pages,
+			huge_page_list, nr_huge_pages);
 }
 
 static int add_pages_to_exchange_list(struct list_head *from_pagelist,
@@ -484,7 +489,9 @@ migrate_out:
 		nr_isolated_to_huge_pages != ULONG_MAX)
 		putback_overflow_pages(nr_isolated_to_base_pages,
 				nr_isolated_to_huge_pages, nr_free_pages_to_node,
-				&from_base_page_list, &from_huge_page_list);
+				&from_base_page_list, &from_huge_page_list,
+				&nr_isolated_from_base_pages,
+				&nr_isolated_from_huge_pages);
 
 	do {
 		DEFINE_DYNAMIC_DEBUG_METADATA(descriptor, "check number of to-be-migrated pages");
