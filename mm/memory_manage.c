@@ -267,12 +267,34 @@ static int add_pages_to_exchange_list(struct list_head *from_pagelist,
 	while (!list_empty(from_pagelist) && !list_empty(to_pagelist)) {
 		struct page *from_page, *to_page;
 		struct exchange_page_info *one_pair = &info_list[info_list_index];
+		int rc;
 
 		from_page = list_first_entry_or_null(from_pagelist, struct page, lru);
 		to_page = list_first_entry_or_null(to_pagelist, struct page, lru);
 
 		if (!from_page || !to_page)
 			break;
+
+		if (!thp_migration_supported() && PageTransHuge(from_page)) {
+			lock_page(from_page);
+			rc = split_huge_page_to_list(from_page, &from_page->lru);
+			unlock_page(from_page);
+			if (rc) {
+				list_move(&from_page->lru, &odd_from_list);
+				continue;
+			}
+		}
+
+		if (!thp_migration_supported() && PageTransHuge(to_page)) {
+			lock_page(to_page);
+			rc = split_huge_page_to_list(to_page, &to_page->lru);
+			unlock_page(to_page);
+			if (rc) {
+				list_move(&to_page->lru, &odd_to_list);
+				continue;
+			}
+		}
+
 		if (hpage_nr_pages(from_page) != hpage_nr_pages(to_page)) {
 			pr_info("from: %d, to: %d\n", hpage_nr_pages(from_page), hpage_nr_pages(to_page));
 			if (!(hpage_nr_pages(from_page) == 1 && hpage_nr_pages(from_page) == HPAGE_PMD_NR)) {
@@ -332,6 +354,12 @@ static unsigned long exchange_pages_between_nodes(unsigned long nr_from_pages,
 	/* non concurrent does not need to split into batches  */
 	if (!migrate_concur || batch_size <= 0)
 		batch_size = info_list_size;
+
+	/* prepare for huge page split  */
+	if (!thp_migration_supported() && huge_page) {
+		batch_size = batch_size * HPAGE_PMD_NR;
+		info_list_size = info_list_size * HPAGE_PMD_NR;
+	}
 
 	info_list = kvzalloc(sizeof(struct exchange_page_info)*batch_size,
 			GFP_KERNEL);
