@@ -512,9 +512,15 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 				nr_isolated_to_huge_pages, &from_huge_page_list,
 				&to_huge_page_list, migration_batch_size, true, mode);
 
-			nr_isolated_to_huge_pages -= nr_exchange_pages * HPAGE_PMD_NR;
+			if (!thp_migration_supported()) {
+			/* split THP above, so we do not need to multiply the counter */
+				nr_isolated_to_huge_pages -= nr_exchange_pages;
+				p->page_migration_stats.nr_exchange_huge_pages += nr_exchange_pages;
+			} else {
+				nr_isolated_to_huge_pages -= nr_exchange_pages * HPAGE_PMD_NR;
+				p->page_migration_stats.nr_exchange_huge_pages += nr_exchange_pages * HPAGE_PMD_NR;
+			}
 
-			p->page_migration_stats.nr_exchange_huge_pages += nr_exchange_pages * HPAGE_PMD_NR;
 			p->page_migration_stats.nr_exchanges += 1;
 
 			goto migrate_out;
