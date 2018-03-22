@@ -497,14 +497,15 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 			 * base pages can include file-backed ones, we do not handle them
 			 * at the moment
 			 */
-			nr_exchange_pages =  exchange_pages_between_nodes(nr_isolated_from_base_pages,
-				nr_isolated_to_base_pages, &from_base_page_list,
-				&to_base_page_list, migration_batch_size, false, mode);
+			if (!thp_migration_supported()) {
+				nr_exchange_pages =  exchange_pages_between_nodes(nr_isolated_from_base_pages,
+					nr_isolated_to_base_pages, &from_base_page_list,
+					&to_base_page_list, migration_batch_size, false, mode);
 
-			nr_isolated_to_base_pages -= nr_exchange_pages;
+				nr_isolated_to_base_pages -= nr_exchange_pages;
 
-			p->page_migration_stats.nr_exchanges += 1;
-			p->page_migration_stats.nr_exchange_base_pages += nr_exchange_pages;
+				p->page_migration_stats.nr_exchange_base_pages += nr_exchange_pages;
+			}
 
 			/* THP page exchange */
 			nr_exchange_pages =  exchange_pages_between_nodes(nr_isolated_from_huge_pages,
@@ -514,6 +515,7 @@ static int do_mm_manage(struct task_struct *p, struct mm_struct *mm,
 			nr_isolated_to_huge_pages -= nr_exchange_pages * HPAGE_PMD_NR;
 
 			p->page_migration_stats.nr_exchange_huge_pages += nr_exchange_pages * HPAGE_PMD_NR;
+			p->page_migration_stats.nr_exchanges += 1;
 
 			goto migrate_out;
 		} else {
