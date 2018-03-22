@@ -119,11 +119,11 @@ int exchange_page_lists_mthread(struct page **to, struct page **from, int nr_pag
 	const struct cpumask *per_node_cpumask = cpumask_of_node(to_node);
 	int cpu_id_list[32] = {0};
 	int cpu;
+	int item_idx;
 
 
 	total_mt_num = min_t(unsigned int, total_mt_num,
 						 cpumask_weight(per_node_cpumask));
-	total_mt_num = min_t(int, nr_pages, total_mt_num);
 
 	if (total_mt_num > 32 || total_mt_num < 1)
 		return -ENODEV;
@@ -150,7 +150,6 @@ int exchange_page_lists_mthread(struct page **to, struct page **from, int nr_pag
 	if (!work_items)
 		return -ENOMEM;
 
-
 	i = 0;
 	for_each_cpu(cpu, per_node_cpumask) {
 		if (i >= total_mt_num)
@@ -159,19 +158,49 @@ int exchange_page_lists_mthread(struct page **to, struct page **from, int nr_pag
 		++i;
 	}
 
-	for (i = 0; i < nr_pages; ++i) {
-		int thread_idx = i % total_mt_num;
+	if (nr_pages < total_mt_num) {
+		for (cpu = 0; cpu < total_mt_num; ++cpu)
+			INIT_WORK((struct work_struct *)&work_items[cpu],
+					  exchange_page_work_queue_thread);
+		cpu = 0;
+		for (item_idx = 0; item_idx < nr_pages; ++item_idx) {
+			unsigned long chunk_size = nr_pages * PAGE_SIZE * hpage_nr_pages(from[item_idx]) / total_mt_num;
+			char *vfrom = kmap(from[item_idx]);
+			char *vto = kmap(to[item_idx]);
+			VM_BUG_ON(PAGE_SIZE * hpage_nr_pages(from[item_idx]) % total_mt_num);
+			VM_BUG_ON(total_mt_num % nr_pages);
+			BUG_ON(hpage_nr_pages(to[item_idx]) !=
+				   hpage_nr_pages(from[item_idx]));
 
-		INIT_WORK((struct work_struct *)&work_items[i], exchange_page_work_queue_thread);
+			for (i = 0; i < (total_mt_num/nr_pages); ++cpu, ++i) {
+				work_items[cpu].to = vto + chunk_size * i;
+				work_items[cpu].from = vfrom + chunk_size * i;
+				work_items[cpu].chunk_size = chunk_size;
+			}
+		}
+		if (cpu != total_mt_num)
+			pr_err("%s: only %d out of %d pages are transferred\n", __func__,
+				cpu - 1, total_mt_num);
 
-		/* XXX: assume no highmem  */
-		work_items[i].to = kmap(to[i]);
-		work_items[i].from = kmap(from[i]);
-		work_items[i].chunk_size = PAGE_SIZE * hpage_nr_pages(from[i]);
+		for (cpu = 0; cpu < total_mt_num; ++cpu)
+			queue_work_on(cpu_id_list[cpu],
+						  system_highpri_wq,
+						  (struct work_struct *)&work_items[cpu]);
+	} else {
+		for (i = 0; i < nr_pages; ++i) {
+			int thread_idx = i % total_mt_num;
 
-		BUG_ON(hpage_nr_pages(to[i]) != hpage_nr_pages(from[i]));
+			INIT_WORK((struct work_struct *)&work_items[i], exchange_page_work_queue_thread);
 
-		queue_work_on(cpu_id_list[thread_idx], system_highpri_wq, (struct work_struct *)&work_items[i]);
+			/* XXX: assume no highmem  */
+			work_items[i].to = kmap(to[i]);
+			work_items[i].from = kmap(from[i]);
+			work_items[i].chunk_size = PAGE_SIZE * hpage_nr_pages(from[i]);
+
+			BUG_ON(hpage_nr_pages(to[i]) != hpage_nr_pages(from[i]));
+
+			queue_work_on(cpu_id_list[thread_idx], system_highpri_wq, (struct work_struct *)&work_items[i]);
+		}
 	}
 
 	/* Wait until it finishes  */
