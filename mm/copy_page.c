@@ -130,13 +130,18 @@ int copy_page_lists_mt(struct page **to, struct page **from, int nr_items)
 
 	total_mt_num = min_t(unsigned int, total_mt_num,
 						 cpumask_weight(per_node_cpumask));
-	total_mt_num = min_t(int, nr_items, total_mt_num);
+
 
 	if (total_mt_num > 32)
 		return -ENODEV;
 
-	max_items_per_thread = (nr_items / total_mt_num) +
-			((nr_items % total_mt_num)?1:0);
+	/* Each threads get part of each page, if nr_items < totla_mt_num */
+	if (nr_items < total_mt_num)
+		max_items_per_thread = nr_items;
+	else
+		max_items_per_thread = (nr_items / total_mt_num) +
+				((nr_items % total_mt_num)?1:0);
+
 
 	for (cpu = 0; cpu < total_mt_num; ++cpu) {
 		work_items[cpu] = kzalloc(sizeof(struct copy_page_info) +
@@ -155,37 +160,66 @@ int copy_page_lists_mt(struct page **to, struct page **from, int nr_items)
 		++i;
 	}
 
-	item_idx = 0;
-	for (cpu = 0; cpu < total_mt_num; ++cpu) {
-		int num_xfer_per_thread = nr_items / total_mt_num;
-		int per_cpu_item_idx;
-
-		if (cpu < (nr_items % total_mt_num))
-			num_xfer_per_thread += 1;
-
-		INIT_WORK((struct work_struct *)work_items[cpu],
-				  copy_page_work_queue_thread);
-
-		work_items[cpu]->num_items = num_xfer_per_thread;
-		for (per_cpu_item_idx = 0; per_cpu_item_idx < work_items[cpu]->num_items;
-			 ++per_cpu_item_idx, ++item_idx) {
-			work_items[cpu]->item_list[per_cpu_item_idx].to = kmap(to[item_idx]);
-			work_items[cpu]->item_list[per_cpu_item_idx].from =
-				kmap(from[item_idx]);
-			work_items[cpu]->item_list[per_cpu_item_idx].chunk_size =
-				PAGE_SIZE * hpage_nr_pages(from[item_idx]);
-
-			BUG_ON(hpage_nr_pages(to[item_idx]) !=
-				   hpage_nr_pages(from[item_idx]));
+	if (nr_items < total_mt_num) {
+		for (cpu = 0; cpu < total_mt_num; ++cpu) {
+			INIT_WORK((struct work_struct *)work_items[cpu],
+					  copy_page_work_queue_thread);
+			work_items[cpu]->num_items = max_items_per_thread;
 		}
 
-		queue_work_on(cpu_id_list[cpu],
-					  system_highpri_wq,
-					  (struct work_struct *)work_items[cpu]);
+		for (item_idx = 0; item_idx < nr_items; ++item_idx) {
+			unsigned long chunk_size = PAGE_SIZE * hpage_nr_pages(from[item_idx]) / total_mt_num;
+			char *vfrom = kmap(from[item_idx]);
+			char *vto = kmap(to[item_idx]);
+			VM_BUG_ON(PAGE_SIZE * hpage_nr_pages(from[item_idx]) % total_mt_num);
+			BUG_ON(hpage_nr_pages(to[item_idx]) !=
+				   hpage_nr_pages(from[item_idx]));
+
+			for (cpu = 0; cpu < total_mt_num; ++cpu) {
+				work_items[cpu]->item_list[item_idx].to = vto + chunk_size * cpu;
+				work_items[cpu]->item_list[item_idx].from = vfrom + chunk_size * cpu;
+				work_items[cpu]->item_list[item_idx].chunk_size =
+					chunk_size;
+			}
+		}
+
+		for (cpu = 0; cpu < total_mt_num; ++cpu)
+			queue_work_on(cpu_id_list[cpu],
+						  system_highpri_wq,
+						  (struct work_struct *)work_items[cpu]);
+	} else {
+		item_idx = 0;
+		for (cpu = 0; cpu < total_mt_num; ++cpu) {
+			int num_xfer_per_thread = nr_items / total_mt_num;
+			int per_cpu_item_idx;
+
+			if (cpu < (nr_items % total_mt_num))
+				num_xfer_per_thread += 1;
+
+			INIT_WORK((struct work_struct *)work_items[cpu],
+					  copy_page_work_queue_thread);
+
+			work_items[cpu]->num_items = num_xfer_per_thread;
+			for (per_cpu_item_idx = 0; per_cpu_item_idx < work_items[cpu]->num_items;
+				 ++per_cpu_item_idx, ++item_idx) {
+				work_items[cpu]->item_list[per_cpu_item_idx].to = kmap(to[item_idx]);
+				work_items[cpu]->item_list[per_cpu_item_idx].from =
+					kmap(from[item_idx]);
+				work_items[cpu]->item_list[per_cpu_item_idx].chunk_size =
+					PAGE_SIZE * hpage_nr_pages(from[item_idx]);
+
+				BUG_ON(hpage_nr_pages(to[item_idx]) !=
+					   hpage_nr_pages(from[item_idx]));
+			}
+
+			queue_work_on(cpu_id_list[cpu],
+						  system_highpri_wq,
+						  (struct work_struct *)work_items[cpu]);
+		}
+		if (item_idx != nr_items)
+			pr_err("%s: only %d out of %d pages are transferred\n", __func__,
+				item_idx - 1, nr_items);
 	}
-	if (item_idx != nr_items)
-		pr_err("%s: only %d out of %d pages are transferred\n", __func__,
-			item_idx - 1, nr_items);
 
 	/* Wait until it finishes  */
 	for (i = 0; i < total_mt_num; ++i)
