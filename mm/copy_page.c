@@ -48,7 +48,11 @@ static void copy_page_work_queue_thread(struct work_struct *work)
 int copy_page_multithread(struct page *to, struct page *from, int nr_pages)
 {
 	unsigned int total_mt_num = limit_mt_num;
+#ifdef CONFIG_PAGE_MIGRATION_PROFILE
 	int to_node = page_to_nid(to);
+#else
+	int to_node = numa_node_id();
+#endif
 	int i;
 	struct copy_page_info *work_items[32] = {0};
 	char *vto, *vfrom;
@@ -120,7 +124,11 @@ int copy_page_lists_mt(struct page **to, struct page **from, int nr_items)
 {
 	int err = 0;
 	unsigned int total_mt_num = limit_mt_num;
+#ifdef CONFIG_PAGE_MIGRATION_PROFILE
 	int to_node = page_to_nid(*to);
+#else
+	int to_node = numa_node_id();
+#endif
 	int i;
 	struct copy_page_info *work_items[32] = {0};
 	const struct cpumask *per_node_cpumask = cpumask_of_node(to_node);
