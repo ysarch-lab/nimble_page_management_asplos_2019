@@ -67,7 +67,7 @@ int exchange_page_mthread(struct page *to, struct page *from, int nr_pages)
 	if (total_mt_num > 32 || total_mt_num < 1)
 		return -ENODEV;
 
-	work_items = kzalloc(sizeof(struct copy_page_info)*total_mt_num, 
+	work_items = kvzalloc(sizeof(struct copy_page_info)*total_mt_num,
 						 GFP_KERNEL);
 	if (!work_items)
 		return -ENOMEM;
@@ -104,7 +104,7 @@ int exchange_page_mthread(struct page *to, struct page *from, int nr_pages)
 	kunmap(to);
 	kunmap(from);
 
-	kfree(work_items);
+	kvfree(work_items);
 
 	return 0;
 }
@@ -128,8 +128,25 @@ int exchange_page_lists_mthread(struct page **to, struct page **from, int nr_pag
 	if (total_mt_num > 32 || total_mt_num < 1)
 		return -ENODEV;
 
-	work_items = kzalloc(sizeof(struct copy_page_info)*nr_pages, 
-						 GFP_KERNEL);
+	if (nr_pages < total_mt_num) {
+		int residual_nr_pages = nr_pages - rounddown_pow_of_two(nr_pages);
+
+		if (residual_nr_pages) {
+			for (i = 0; i < residual_nr_pages; ++i) {
+				BUG_ON(hpage_nr_pages(to[i]) != hpage_nr_pages(from[i]));
+				err = exchange_page_mthread(to[i], from[i], hpage_nr_pages(to[i]));
+				VM_BUG_ON(err);
+			}
+			nr_pages = rounddown_pow_of_two(nr_pages);
+			to = &to[residual_nr_pages];
+			from = &from[residual_nr_pages];
+		}
+
+		work_items = kvzalloc(sizeof(struct copy_page_info)*total_mt_num,
+							 GFP_KERNEL);
+	} else
+		work_items = kvzalloc(sizeof(struct copy_page_info)*nr_pages,
+							 GFP_KERNEL);
 	if (!work_items)
 		return -ENOMEM;
 
@@ -165,7 +182,7 @@ int exchange_page_lists_mthread(struct page **to, struct page **from, int nr_pag
 			kunmap(from[i]);
 	}
 
-	kfree(work_items);
+	kvfree(work_items);
 
 	return err;
 }
