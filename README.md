@@ -1,3 +1,13 @@
+Related information
+============
+
+This is the kernel of "Nimble Page Management for Tiered Memory Systems". 
+Its companion userspace applications and microbenchmarks can be find in 
+https://github.com/ysarch-lab/nimble_page_management_userspace.
+
+Technical details on the kernel will appear in an article soon: https://normal.zone/blog/2019-01-27-nimble-page-management/.
+
+
 Linux kernel
 ============
 
