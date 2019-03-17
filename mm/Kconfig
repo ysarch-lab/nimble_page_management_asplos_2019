@@ -266,6 +266,15 @@ config PAGE_MIGRATION_PROFILE
 	help
 	  Profile migrate hugepages with multiple optimizations to get higher throughput.
 
+config NIMBLE_PAGE_MANAGEMENT
+	bool "Nimble page management option. It selects required kernel modules."
+	def_bool y
+	select ARCH_ENABLE_THP_MIGRATION
+	select TRANSPARENT_HUGEPAGE
+	select MEMCG
+	select MEMCG_SWAP
+	select DYNAMIC_DEBUG
+
 config PHYS_ADDR_T_64BIT
 	def_bool 64BIT
 
