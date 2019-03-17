@@ -6,6 +6,7 @@
  *
  */
 
+#include <linux/sysctl.h>
 #include <linux/highmem.h>
 #include <linux/workqueue.h>
 #include <linux/slab.h>
