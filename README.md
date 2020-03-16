@@ -1,3 +1,17 @@
+Update
+============
+
+Rebase to 5.6-rc6. The kernel compiles but is not tested.
+
+The two added syscall numbers are changed due to new syscalls added to the new
+kernel:
+
+1. 333->439 : bd2c4260: exchange page: Add exchange_page() syscall.
+2. 334->440 : 7ceb0525: memory manage: Add memory manage syscall.
+
+You need to update userspace programs (exchange_page microbenchmark and
+end-to-end launcher) accordingly.
+
 Compile the kernel
 ============
 
